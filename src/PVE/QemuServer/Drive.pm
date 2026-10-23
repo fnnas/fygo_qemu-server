@@ -14,6 +14,7 @@ use PVE::Storage::Common;
 use PVE::Tools;
 
 use PVE::QemuServer::Helpers;
+use PVE::QemuServer::EMMC;
 use PVE::QemuServer::Monitor qw(qsd_qmp_peer vm_qmp_peer);
 
 use base qw(Exporter);
@@ -158,6 +159,7 @@ my $MAX_VIRTIO_DISKS = 16;
 our $MAX_SATA_DISKS = 6;
 my $MAX_NVME_DISKS = 16;
 our $MAX_USB_DISKS = 8;
+our $MAX_EMMC_DISKS = 4;
 our $MAX_UNUSED_DISKS = 256;
 our $NEW_DISK_RE = qr!^(([^/:\s]+):)?(\d+(\.\d+)?)$!;
 
@@ -556,6 +558,62 @@ my $usbdiskdesc = {
 };
 PVE::JSONSchema::register_standard_option("pve-qm-usbdisk", $usbdiskdesc);
 
+my %emmc_sub_fmt = (
+    'boot-partition-size' => {
+        type => 'integer',
+        minimum => 0,
+        maximum => 32640 * 1024,
+        default => 0,
+        optional => 1,
+        description => 'Size of each eMMC boot partition in bytes, in multiples of 128 KiB.'
+            . ' The image layout is BOOT1, BOOT2, RPMB, user area; changing sizes reinterprets existing data.',
+    },
+    'rpmb-partition-size' => {
+        type => 'integer',
+        minimum => 0,
+        maximum => 16384 * 1024,
+        default => 0,
+        optional => 1,
+        description =>
+            'Size of the eMMC Replay Protected Memory Block in bytes, in multiples of 128 KiB.'
+            . ' RPMB disables live migration, RAM snapshots and hibernation due to QEMU state restore limitations.',
+    },
+    'boot-config' => {
+        type => 'integer',
+        minimum => 0,
+        maximum => 127,
+        default => 0,
+        optional => 1,
+        description => 'Initial EXT_CSD PARTITION_CONFIG: bits 0-2 select partition access'
+            . ' (0=user, 1=BOOT1, 2=BOOT2, 3=RPMB), bits 3-5 select boot partition'
+            . ' (0=disabled, 1=BOOT1, 2=BOOT2, 7=user), bit 6 enables boot acknowledgement.'
+            . ' This does not set BIOS/UEFI boot priority.',
+    },
+    'auth-key' => {
+        type => 'string',
+        pattern => '^[0-9a-fA-F]{64}$',
+        format_description => 'hex-key',
+        optional => 1,
+        description => 'RPMB authentication key (32 bytes encoded as 64 hex characters).'
+            . ' Requires QEMU support for emmc.auth-key. Stored in the VM configuration.'
+            . ' Guest-programmed keys are lost on cold restarts; this option presets the key each start.',
+    },
+);
+my $emmc_fmt = {
+    %drivedesc_base, %emmc_sub_fmt, media => { %{ $drivedesc_base{media} }, enum => ['disk'] },
+};
+delete $emmc_fmt->@{qw(serial rerror werror discard)};
+my $emmcdesc = {
+    optional => 1,
+    type => 'string',
+    format => $emmc_fmt,
+    description => 'Use volume as eMMC storage on a dedicated SDHCI controller (n is 0 to '
+        . ($MAX_EMMC_DISKS - 1)
+        . '). The volume contains the complete concatenated image.'
+        . ' Device and layout changes require a VM shutdown.',
+};
+PVE::JSONSchema::register_standard_option('pve-qm-emmc', $emmcdesc);
+
 my $sata_fmt = {
     %drivedesc_base, %ssd_fmt, %wwn_fmt,
 };
@@ -685,6 +743,7 @@ my $alldrive_fmt = {
     %model_fmt,
     %nvme_sub_fmt,
     %usbdisk_sub_fmt,
+    %emmc_sub_fmt,
     %product_fmt,
     %queues_fmt,
     %readonly_fmt,
@@ -792,6 +851,11 @@ for (my $i = 0; $i < $MAX_USB_DISKS; $i++) {
     $drivedesc_hash_with_alloc->{"usbdisk$i"} = $desc_with_alloc->('usbdisk', $usbdiskdesc);
 }
 
+for (my $i = 0; $i < $MAX_EMMC_DISKS; $i++) {
+    $drivedesc_hash->{"emmc$i"} = $emmcdesc;
+    $drivedesc_hash_with_alloc->{"emmc$i"} = $desc_with_alloc->('emmc', $emmcdesc);
+}
+
 $drivedesc_hash->{efidisk0} = $efidisk_desc;
 $drivedesc_hash_with_alloc->{efidisk0} = $desc_with_alloc->('efidisk', $efidisk_desc);
 
@@ -804,7 +868,7 @@ for (my $i = 0; $i < $MAX_UNUSED_DISKS; $i++) {
 }
 
 sub valid_drive_names_for_boot {
-    return grep { $_ ne 'efidisk0' && $_ ne 'tpmstate0' } valid_drive_names();
+    return grep { $_ ne 'efidisk0' && $_ ne 'tpmstate0' && $_ !~ /^emmc/ } valid_drive_names();
 }
 
 sub valid_drive_names {
@@ -816,6 +880,7 @@ sub valid_drive_names {
         (map { "sata$_" } (0 .. ($MAX_SATA_DISKS - 1))),
         (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
         (map { "usbdisk$_" } (0 .. ($MAX_USB_DISKS - 1))),
+        (map { "emmc$_" } (0 .. ($MAX_EMMC_DISKS - 1))),
         'efidisk0',
         'tpmstate0',
     );
@@ -836,7 +901,7 @@ PVE::JSONSchema::register_format('pve-qm-bootdisk', \&verify_bootdisk);
 sub verify_bootdisk {
     my ($value, $noerr) = @_;
 
-    return $value if is_valid_drivename($value);
+    return $value if is_valid_drivename($value) && $value !~ /^emmc/;
 
     return if $noerr;
 
@@ -955,8 +1020,16 @@ sub parse_drive {
     $res->{index} = $index;
 
     return
-        if ($interface eq 'nvme' || $interface eq 'usbdisk')
+        if ($interface eq 'nvme' || $interface eq 'usbdisk' || $interface eq 'emmc')
         && ($res->{file} eq 'none' || $res->{file} eq 'cdrom' || drive_is_cloudinit($res));
+
+    if ($interface eq 'emmc') {
+        eval { PVE::QemuServer::EMMC::validate_options($res); };
+        if (my $err = $@) {
+            warn $err;
+            return;
+        }
+    }
 
     my $error = 0;
     foreach my $opt (qw(bps bps_rd bps_wr)) {

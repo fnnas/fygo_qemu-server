@@ -13,6 +13,7 @@ SOURCES=Agent.pm	\
 	DBusVMState.pm	\
 	Drive.pm	\
 	DriveDevice.pm	\
+	EMMC.pm		\
 	Helpers.pm	\
 	ImportDisk.pm	\
 	Machine.pm	\

@@ -79,6 +79,21 @@ sub print_drivedevice_full {
     my $has_write_cache = 1; # whether the device has a 'write-cache' option
 
     my $drive_id = PVE::QemuServer::Drive::get_drive_id($drive);
+    if ($drive->{interface} eq 'emmc') {
+        if ($conf->{template}) {
+            # Templates run paused for backups only. eMMC requires a writable backend,
+            # so use an unused virtio frontend for accessing the read-only base image.
+            my $pciaddr = print_pci_addr("sdhci-$drive_id", $arch);
+            return "virtio-blk-pci,id=$drive_id,drive=drive-$drive_id$pciaddr";
+        }
+        my $device = "emmc,id=$drive_id,drive=drive-$drive_id,bus=pci.4/sdhci-$drive_id/sd-bus";
+        for my $option (qw(boot-partition-size rpmb-partition-size boot-config auth-key)) {
+            $device .= ",$option=$drive->{$option}" if defined($drive->{$option});
+        }
+        # eMMC has no bootindex, serial, write-cache or block error action properties.
+        return $device;
+    }
+
     if ($drive->{interface} eq 'virtio') {
         my $pciaddr = print_pci_addr("$drive_id", $arch);
         $device = 'virtio-blk-pci';

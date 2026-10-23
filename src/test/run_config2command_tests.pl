@@ -351,6 +351,11 @@ $storage_module->mock(
     },
 );
 
+# eMMC command fixtures carry the virtual size of their simulated backing image.
+# Actual storage size queries and invalid layouts are covered by run_emmc_tests.pl.
+my $emmc_module = Test::MockModule->new('PVE::QemuServer::EMMC');
+$emmc_module->mock(image_size => sub { return $_[1]->{size}; });
+
 my $file_stat_module = Test::MockModule->new("File::stat");
 $file_stat_module->mock(
     stat => sub {

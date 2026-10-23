@@ -219,6 +219,11 @@ sub prepare {
         die "can't live migrate VM with NVMe disks: " . join(', ', @nvme_disks) . "\n"
             if @nvme_disks;
 
+        my @emmc_rpmb = PVE::QemuMigrate::Helpers::emmc_rpmb_state_blockers($conf);
+        die "can't live migrate VM with eMMC RPMB disks (QEMU state restore is unsupported): "
+            . join(', ', @emmc_rpmb) . "; shut down the VM and migrate offline\n"
+            if @emmc_rpmb;
+
         if ($self->{is_replicated} && !$self->{replication_jobcfg}) {
             if ($self->{opts}->{force}) {
                 $self->log(

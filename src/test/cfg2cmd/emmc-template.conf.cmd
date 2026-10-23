@@ -1,0 +1,32 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -object 'monitor-qmp,chardev=qmp,id=monitor-qmp' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -object 'monitor-qmp,chardev=qmp-event,id=monitor-qmp-event' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vga none \
+  -nographic \
+  -cpu qemu64 \
+  -m 512 \
+  -object '{"id":"throttle-drive-emmc0","limits":{},"qom-type":"throttle-group"}' \
+  -global 'PIIX4_PM.disable_s3=1' \
+  -global 'PIIX4_PM.disable_s4=1' \
+  -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pci.0,addr=0x1e' \
+  -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pci.0,addr=0x1f' \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'piix3-usb-uhci,id=uhci,bus=pci.0,addr=0x1.0x2' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
+  -device 'usb-tablet,id=tablet,bus=uhci.0,port=1' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"qcow2","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/base-8006-disk-0.qcow2","node-name":"e9d0e2b1d25fc638d88f49236affb83","read-only":true},"node-name":"f9d0e2b1d25fc638d88f49236affb83","read-only":true},"node-name":"drive-emmc0","read-only":true,"throttle-group":"throttle-drive-emmc0"}' \
+  -device 'virtio-blk-pci,id=emmc0,drive=drive-emmc0,bus=pci.4,addr=0x15' \
+  -machine 'accel=tcg,smm=off,type=pc+pve0' \
+  -snapshot
