@@ -5,6 +5,7 @@ use warnings;
 
 use Fcntl qw(S_ISBLK);
 use File::stat;
+use File::Temp;
 use JSON;
 
 use PVE::Format qw(render_bytes);
@@ -14,6 +15,59 @@ use PVE::Tools;
 use PVE::QemuServer::Blockdev;
 use PVE::QemuServer::Drive qw(checked_volume_format);
 use PVE::QemuServer::Helpers;
+use PVE::QemuServer::NVMe;
+
+# Only call this for a newly allocated, empty image. Existing, imported and
+# restored images already have their own metadata and must never be initialized.
+sub initialize_nvme_pi {
+    my ($storecfg, $drive) = @_;
+    return if !$drive->{pi};
+
+    my ($storeid) = PVE::Storage::parse_volume_id($drive->{file}, 1);
+    PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $storeid;
+    my $size = PVE::QemuServer::NVMe::image_size($storecfg, $drive);
+    die "cannot determine new NVMe image size\n" if !defined($size) || $size <= 0;
+    PVE::QemuServer::NVMe::validate_size($drive, $size);
+    my $block = $drive->{logical_block_size} // 512;
+    my $lbas = int($size / ($block + $drive->{ms}));
+    my $offset = $lbas * $block;
+    my $remaining = $lbas * $drive->{ms};
+
+    # An all-ones PI tuple marks an unwritten LBA for every protection type.
+    # Zeroed metadata contains invalid reference tags for most LBAs. Relying on
+    # sparse allocation status is insufficient once a neighboring LBA is written.
+    # Bound each write buffer, including for large namespaces, and leave the
+    # entire user-data area (and unused image padding) untouched.
+    my $commands = File::Temp->new();
+    while ($remaining) {
+        my $length = $remaining < 4 * 1024**2 ? $remaining : 4 * 1024**2;
+        print {$commands} "write -q -P 255 $offset $length\n" or die "write PI commands: $!\n";
+        $offset += $length;
+        $remaining -= $length;
+    }
+    print {$commands} "flush\n" or die "write PI commands: $!\n";
+    seek($commands, 0, 0) or die "rewind PI commands: $!\n";
+
+    # Use the storage layer for protocols and formats, but not VM cache, aio,
+    # throttling, snapshot or read-only settings during initial allocation.
+    my $target = { file => $drive->{file}, interface => 'nvme', index => $drive->{index} };
+    $target->{format} = $drive->{format} if defined($drive->{format});
+    my $blockdev = PVE::QemuServer::Blockdev::generate_drive_blockdev(
+        $storecfg,
+        $target,
+        PVE::QemuServer::Helpers::kvm_user_version(),
+        { 'no-throttle' => 1 },
+    );
+    for (my $node = $blockdev; $node; $node = $node->{file}) {
+        delete $node->{$_} for qw(cache aio node-name detect-zeroes discard);
+    }
+    PVE::Tools::run_command(
+        ['/usr/bin/qemu-io', '--', 'json:' . encode_json($blockdev)],
+        input => '<&' . fileno($commands),
+        quiet => 1,
+        errmsg => 'initializing NVMe protection information failed',
+    );
+}
 
 sub convert_iscsi_path {
     my ($path) = @_;

@@ -14,6 +14,7 @@
   -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
   -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
   -m 512 \
+  -object '{"id":"throttle-drive-nvme0","limits":{},"qom-type":"throttle-group"}' \
   -object '{"id":"throttle-drive-emmc0","limits":{},"qom-type":"throttle-group"}' \
   -object '{"id":"throttle-drive-emmc1","limits":{"iops-read":200},"qom-type":"throttle-group"}' \
   -object '{"id":"throttle-drive-emmc2","limits":{},"qom-type":"throttle-group"}' \
@@ -28,6 +29,8 @@
   -device 'VGA,id=vga,bus=pci.0,addr=0x2' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-4.raw","node-name":"ef36424817cb9d2b90e3981b4f572f4","read-only":false},"node-name":"ff36424817cb9d2b90e3981b4f572f4","read-only":false},"node-name":"drive-nvme0","read-only":false,"throttle-group":"throttle-drive-nvme0"}' \
+  -device 'nvme,id=nvme0,drive=drive-nvme0,bus=pci.4,addr=0x4,use-intel-id=on,bootindex=100,serial=nvme0,write-cache=on' \
   -device 'sdhci-pci,id=sdhci-emmc0,sd-spec-version=2,bus=pci.4,addr=0x15' \
   -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"e690b2daac1bc06c0135f80984c552d","read-only":false},"node-name":"f690b2daac1bc06c0135f80984c552d","read-only":false},"node-name":"drive-emmc0","read-only":false,"throttle-group":"throttle-drive-emmc0"}' \
   -device 'emmc,id=emmc0,drive=drive-emmc0,bus=pci.4/sdhci-emmc0/sd-bus,boot-partition-size=1048576,rpmb-partition-size=2097152,boot-config=72' \

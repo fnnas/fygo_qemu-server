@@ -15,6 +15,7 @@ use PVE::Tools;
 
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::EMMC;
+use PVE::QemuServer::NVMe;
 use PVE::QemuServer::Monitor qw(qsd_qmp_peer vm_qmp_peer);
 
 use base qw(Exporter);
@@ -157,6 +158,7 @@ my $MAX_IDE_DISKS = 4;
 our $MAX_SCSI_DISKS = 31;
 my $MAX_VIRTIO_DISKS = 16;
 our $MAX_SATA_DISKS = 6;
+my $MAX_NVME_DISKS = 16;
 our $MAX_EMMC_DISKS = 4;
 our $MAX_UNUSED_DISKS = 256;
 our $NEW_DISK_RE = qr!^(([^/:\s]+):)?(\d+(\.\d+)?)$!;
@@ -347,6 +349,8 @@ my %wwn_fmt = (
     },
 );
 
+my %nvme_sub_fmt = PVE::QemuServer::NVMe::option_schema()->%*;
+
 my $add_throttle_desc = sub {
     my ($key, $type, $what, $unit, $longunit, $minimum) = @_;
     my $d = {
@@ -482,6 +486,23 @@ my $scsidesc = {
         . ($MAX_SCSI_DISKS - 1) . ").",
 };
 PVE::JSONSchema::register_standard_option("pve-qm-scsi", $scsidesc);
+
+my $nvme_fmt = {
+    %drivedesc_base,
+    %readonly_fmt,
+    %nvme_sub_fmt,
+    media => { %{ $drivedesc_base{media} }, enum => ['disk'] },
+};
+# NVMe controllers do not support configurable block error actions or IOThreads.
+delete $nvme_fmt->@{qw(rerror werror)};
+
+my $nvmedesc = {
+    optional => 1,
+    type => 'string',
+    format => $nvme_fmt,
+    description => "Use volume as NVMe hard disk (n is 0 to " . ($MAX_NVME_DISKS - 1) . ").",
+};
+PVE::JSONSchema::register_standard_option("pve-qm-nvme", $nvmedesc);
 
 my %emmc_sub_fmt = (
     cid => {
@@ -677,6 +698,7 @@ my $alldrive_fmt = {
     %drivedesc_base,
     %iothread_fmt,
     %model_fmt,
+    %nvme_sub_fmt,
     %emmc_sub_fmt,
     %product_fmt,
     %queues_fmt,
@@ -775,6 +797,11 @@ for (my $i = 0; $i < $MAX_VIRTIO_DISKS; $i++) {
     $drivedesc_hash_with_alloc->{"virtio$i"} = $desc_with_alloc->('virtio', $virtiodesc);
 }
 
+for (my $i = 0; $i < $MAX_NVME_DISKS; $i++) {
+    $drivedesc_hash->{"nvme$i"} = $nvmedesc;
+    $drivedesc_hash_with_alloc->{"nvme$i"} = $desc_with_alloc->('nvme', $nvmedesc);
+}
+
 for (my $i = 0; $i < $MAX_EMMC_DISKS; $i++) {
     $drivedesc_hash->{"emmc$i"} = $emmcdesc;
     $drivedesc_hash_with_alloc->{"emmc$i"} = $desc_with_alloc->('emmc', $emmcdesc);
@@ -802,6 +829,7 @@ sub valid_drive_names {
         (map { "scsi$_" } (0 .. ($MAX_SCSI_DISKS - 1))),
         (map { "virtio$_" } (0 .. ($MAX_VIRTIO_DISKS - 1))),
         (map { "sata$_" } (0 .. ($MAX_SATA_DISKS - 1))),
+        (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
         (map { "emmc$_" } (0 .. ($MAX_EMMC_DISKS - 1))),
         'efidisk0',
         'tpmstate0',
@@ -942,11 +970,19 @@ sub parse_drive {
     $res->{index} = $index;
 
     return
-        if ($interface eq 'emmc')
+        if ($interface eq 'nvme' || $interface eq 'emmc')
         && ($res->{file} eq 'none' || $res->{file} eq 'cdrom' || drive_is_cloudinit($res));
 
     if ($interface eq 'emmc') {
         eval { PVE::QemuServer::EMMC::validate_options($res); };
+        if (my $err = $@) {
+            warn $err;
+            return;
+        }
+    }
+
+    if ($interface eq 'nvme') {
+        eval { PVE::QemuServer::NVMe::validate_options($res); };
         if (my $err = $@) {
             warn $err;
             return;
@@ -1128,6 +1164,7 @@ sub resolve_first_disk {
     foreach my $ds (@disks) {
         next if !$conf->{$ds};
         my $disk = parse_drive($ds, $conf->{$ds});
+        next if $disk && $disk->{interface} eq 'nvme' && $disk->{detached};
         next if drive_is_cdrom($disk) xor $cdrom;
         return $ds;
     }

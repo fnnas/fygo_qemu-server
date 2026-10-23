@@ -1,0 +1,32 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -object 'monitor-qmp,chardev=qmp,id=monitor-qmp' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -object 'monitor-qmp,chardev=qmp-event,id=monitor-qmp-event' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
+  -m 512 \
+  -object '{"id":"throttle-drive-nvme9","limits":{},"qom-type":"throttle-group"}' \
+  -global 'ICH9-LPC.disable_s3=1' \
+  -global 'ICH9-LPC.disable_s4=1' \
+  -readconfig /usr/share/qemu-server/pve-q35-4.0.cfg \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
+  -device 'VGA,id=vga,bus=pcie.0,addr=0x1' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -device 'pcie-root-port,id=nvme-port8,bus=pcie.0,addr=0x8.0,multifunction=on,chassis=208' \
+  -device 'pcie-root-port,id=nvme-port9,bus=pcie.0,addr=0x8.1,multifunction=on,chassis=209' \
+  -device 'nvme-subsys,id=nvme-subsys-nvme9,nqn=vm8006-nvme9' \
+  -device 'nvme,id=nvme-ctrl-nvme9,subsys=nvme-subsys-nvme9,bus=nvme-port9,addr=0x0,serial=nvme9,use-intel-id=on,sriov_max_vfs=2,sriov_vq_flexible=4,sriov_vi_flexible=2' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"ee1741cdc8b97368868ed9fec7c259f","read-only":false},"node-name":"fe1741cdc8b97368868ed9fec7c259f","read-only":false},"node-name":"drive-nvme9","read-only":false,"throttle-group":"throttle-drive-nvme9"}' \
+  -device 'nvme-ns,id=nvme9,drive=drive-nvme9,bus=nvme-ctrl-nvme9,nsid=10,uuid=f6b4a993-34c1-593e-a1bd-7ae871a285c1,write-cache=on' \
+  -machine 'type=q35+pve0'

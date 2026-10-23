@@ -278,6 +278,7 @@ sub get_pci_addr_map {
         'scsihw2' => { bus => 4, addr => 1 },
         'scsihw3' => { bus => 4, addr => 2 },
         'scsihw4' => { bus => 4, addr => 3 },
+        (map { ("nvme$_" => { bus => 4, addr => 4 + $_ }) } 0 .. 15),
         (map { ("sdhci-emmc$_" => { bus => 4, addr => 21 + $_ }) } 0 .. 3),
         }
         if !defined($pci_addr_map);
@@ -328,6 +329,10 @@ my $pcie_addr_map;
 sub get_pcie_addr_map {
     $pcie_addr_map = {
         vga => { bus => 'pcie.0', addr => 1 },
+        # Reserve these Q35 multifunction root slots for isolated NVMe SR-IOV ports.
+        # Functions 0..7 cover controller owners 0..7 and 8..15 respectively.
+        'nvme-port0' => { bus => 'pcie.0', addr => 7 },
+        'nvme-port8' => { bus => 'pcie.0', addr => 8 },
         hostpci0 => { bus => "ich9-pcie-port-1", addr => 0 },
         hostpci1 => { bus => "ich9-pcie-port-2", addr => 0 },
         hostpci2 => { bus => "ich9-pcie-port-3", addr => 0 },
@@ -885,7 +890,7 @@ sub reserve_pci_usage {
 # Returns a list of bridge devices which are necessary for the remaining
 # devices.
 sub get_pci_bridges {
-    my ($conf, $arch, $q35, $max_scsihw, $version_guard) = @_;
+    my ($conf, $arch, $q35, $max_scsihw, $version_guard, $multifunction) = @_;
 
     my $bridges = {
         # 0 => 1, always present
@@ -899,7 +904,7 @@ sub get_pci_bridges {
     # so scsi14 and upwards need scsihw2,3,4 which live on bridge 4
     $bridges->{4} = 1 if $max_scsihw > 1 || $version_guard->(11, 1);
     $bridges->{4} = 1
-        if grep { /^(?:emmc)\d+$/ && defined($conf->{$_}) } keys $conf->%*;
+        if grep { /^(?:nvme|emmc)\d+$/ && defined($conf->{$_}) } keys $conf->%*;
 
     # use cheap legacy igd check instead of a full parse_hostpci
     my $legacy_igd = 0;
@@ -923,6 +928,7 @@ sub get_pci_bridges {
         }
         my $pciaddr = print_pci_addr("pci.$k_name", $arch);
         my $devstr = "pci-bridge,id=pci.$k,chassis_nr=$k$pciaddr";
+        $devstr .= ',multifunction=on' if $multifunction && $multifunction->{$k};
 
         push @$devices, '-device', $devstr;
     }

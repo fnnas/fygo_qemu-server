@@ -70,7 +70,7 @@ my sub is_fleecing_top_node {
 sub qdev_id_to_drive_id {
     my ($qdev_id) = @_;
 
-    if ($qdev_id =~ m{^/machine/peripheral/((?:virtio|emmc)\d+)/virtio-backend$}) {
+    if ($qdev_id =~ m{^/machine/peripheral/((?:virtio|emmc|nvme)\d+)/virtio-backend$}) {
         return $1;
     } elsif ($qdev_id =~ m{^/machine/(?:system|virt)\.flash0$}) {
         return 'pflash0';
@@ -78,7 +78,7 @@ sub qdev_id_to_drive_id {
         return 'efidisk0';
     }
 
-    return $1 if $qdev_id =~ m|^/machine/peripheral/(emmc\d+)$|;
+    return $1 if $qdev_id =~ m{^/machine/peripheral/((?:emmc|nvme)\d+)$};
 
     return $qdev_id; # for SCSI/SATA/IDE it's the same
 }
@@ -733,6 +733,8 @@ sub resize {
     my $running = PVE::QemuServer::Helpers::vm_running_locally($vmid);
     my $drive_id = $deviceid =~ s/^drive-//r;
 
+    die "cannot resize NVMe disk '$drive_id' while the VM is running - shut down the VM first\n"
+        if $running && $drive_id =~ m/^nvme\d+$/;
     die "cannot resize eMMC disk '$drive_id' while the VM is running - shut down the VM first\n"
         if $running && $drive_id =~ m/^emmc\d+$/;
 

@@ -8,6 +8,7 @@ use URI::Escape;
 use PVE::QemuServer::Drive qw (drive_is_cdrom);
 use PVE::QemuServer::Helpers qw(kvm_user_version min_version);
 use PVE::QemuServer::Machine;
+use PVE::QemuServer::NVMe;
 use PVE::QemuServer::PCI qw(print_pci_addr);
 
 use base qw(Exporter);
@@ -199,6 +200,13 @@ sub print_drivedevice_full {
             }
         }
         $device .= ",wwn=$drive->{wwn}" if $drive->{wwn};
+    } elsif ($drive->{interface} eq 'nvme') {
+        if (PVE::QemuServer::NVMe::has_explicit_namespace($conf, $drive)) {
+            return PVE::QemuServer::NVMe::namespace_device($conf, $vmid, $drive, $arch);
+        }
+        my $pciaddr = print_pci_addr($drive_id, $arch);
+        $device = "nvme,id=$drive_id,drive=drive-$drive_id$pciaddr";
+        $device .= PVE::QemuServer::NVMe::controller_options($drive);
     } elsif ($drive->{interface} eq 'usb') {
         die "implement me";
         #  -device ide-drive,bus=ide.1,unit=0,drive=drive-ide0-1-0,id=ide0-1-0
@@ -208,9 +216,11 @@ sub print_drivedevice_full {
 
     $device .= ",bootindex=$drive->{bootindex}" if $drive->{bootindex};
 
-    if (my $serial = $drive->{serial}) {
+    if (defined(my $serial = $drive->{serial})) {
         $serial = _escape_qemu_arg_value(URI::Escape::uri_unescape($serial));
         $device .= ",serial=$serial";
+    } elsif ($drive->{interface} eq 'nvme') {
+        $device .= ",serial=$drive_id";
     }
 
     if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev

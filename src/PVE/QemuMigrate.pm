@@ -38,6 +38,7 @@ use PVE::QemuServer::Machine;
 use PVE::QemuServer::Monitor qw(mon_cmd vm_qmp_peer);
 use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::Network;
+use PVE::QemuServer::NVMe;
 use PVE::QemuServer::QMPHelpers;
 use PVE::QemuServer::DBusVMState;
 use PVE::QemuServer;
@@ -216,6 +217,10 @@ sub prepare {
     if (my $pid = PVE::QemuServer::check_running($vmid)) {
         die "can't migrate running VM without --online\n" if !$online;
         $running = $pid;
+
+        my @nvme_disks = sort grep { /^nvme\d+$/ } keys $conf->%*;
+        die "can't live migrate VM with NVMe disks: " . join(', ', @nvme_disks) . "\n"
+            if @nvme_disks;
 
         my @emmc_rpmb = PVE::QemuMigrate::Helpers::emmc_rpmb_state_blockers($conf);
         die "can't live migrate VM with eMMC RPMB disks (QEMU state restore is unsupported): "
@@ -735,7 +740,8 @@ sub sync_offline_local_volumes {
             sub {
                 my ($key, $drive) = @_;
                 push $layout_drives->{ $drive->{file} }->@*, $drive
-                    if $drive->{interface} eq 'emmc';
+                    if ($drive->{interface} eq 'nvme' && $drive->{ms})
+                    || $drive->{interface} eq 'emmc';
             },
         );
     }
@@ -831,6 +837,10 @@ sub sync_offline_local_volumes {
                     # An unchanged import cannot introduce a capacity mismatch.
                     PVE::QemuServer::EMMC::validate_size($drive, $target_size)
                         if $target_size != $local_volumes->{$volid}->{size};
+                } else {
+                    PVE::QemuServer::NVMe::assert_copy_size(
+                        $drive, $local_volumes->{$volid}->{size}, $target_size,
+                    );
                 }
             }
         }

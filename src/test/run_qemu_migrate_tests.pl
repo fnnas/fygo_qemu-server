@@ -504,6 +504,12 @@ sub local_volids_for_vm {
     return $res;
 }
 
+my $nvme_config_patch = {
+    scsi0 => undef,
+    nvme0 => 'local-lvm:vm-149-disk-0,format=raw,size=4G',
+    bootdisk => 'nvme0',
+};
+
 my $tests = [
     # each test consists of the following:
     # name           - unique name for the test which also serves as a dir name.
@@ -1635,6 +1641,52 @@ my $tests = [
             vm_status => {
                 running => 0,
             },
+        },
+    },
+    {
+        name => '149_nvme_offline',
+        target => 'pve1',
+        vmid => 149,
+        vm_status => { running => 0 },
+        config_patch => $nvme_config_patch,
+        opts => { 'with-local-disks' => 1 },
+        expected_calls => $default_expected_calls_offline,
+        expected => {
+            source_volids => {},
+            target_volids => local_volids_for_vm(149),
+            vm_config => get_patched_config(149, $nvme_config_patch),
+            vm_status => { running => 0 },
+        },
+    },
+    {
+        name => '149_nvme_stopped_online_flag',
+        target => 'pve1',
+        vmid => 149,
+        vm_status => { running => 0 },
+        config_patch => $nvme_config_patch,
+        opts => { online => 1, 'with-local-disks' => 1 },
+        expected_calls => $default_expected_calls_offline,
+        expected => {
+            source_volids => {},
+            target_volids => local_volids_for_vm(149),
+            vm_config => get_patched_config(149, $nvme_config_patch),
+            vm_status => { running => 0 },
+        },
+    },
+    {
+        name => '149_nvme_online_rejected',
+        target => 'pve1',
+        vmid => 149,
+        vm_status => { running => 1, runningmachine => 'pc-q35-5.0+pve0' },
+        config_patch => $nvme_config_patch,
+        opts => { online => 1, force => 1, 'with-local-disks' => 1 },
+        expected_calls => {},
+        expect_die => "can't live migrate VM with NVMe disks: nvme0",
+        expected => {
+            source_volids => local_volids_for_vm(149),
+            target_volids => {},
+            vm_config => get_patched_config(149, $nvme_config_patch),
+            vm_status => { running => 1, runningmachine => 'pc-q35-5.0+pve0' },
         },
     },
     {
