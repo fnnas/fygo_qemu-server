@@ -2,11 +2,14 @@ package PVE::QemuServer::USB;
 
 use strict;
 use warnings;
+use PVE::QemuServer::Drive;
 use PVE::QemuServer::PCI qw(print_pci_addr);
 use PVE::QemuServer::Machine;
+use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::Helpers qw(min_version windows_version);
 use PVE::JSONSchema;
 use PVE::Mapping::USB;
+use PVE::Tools qw(split_list);
 use base 'Exporter';
 
 our @EXPORT_OK = qw(
@@ -74,6 +77,16 @@ our $usbdesc = {
 };
 PVE::JSONSchema::register_standard_option("pve-qm-usb", $usbdesc);
 
+PVE::JSONSchema::register_standard_option(
+    'pve-qm-usbdisk-controller',
+    {
+        type => 'boolean',
+        optional => 1,
+        description =>
+            'Preserve USB storage controller presence when loading VM state. For internal use only.',
+    },
+);
+
 sub parse_usb_device {
     my ($value, $mapping) = @_;
 
@@ -119,8 +132,38 @@ my sub assert_usb_index_is_useable {
     return undef;
 }
 
+# Without configured disks, both the presence and absence of the controller
+# must be preserved when transferring state from older running VMs.
+sub get_usbdisk_controller_override {
+    my ($vmid, $conf) = @_;
+
+    return undef if grep { /^usbdisk\d+$/ && defined($conf->{$_}) } keys $conf->%*;
+
+    my $devices = mon_cmd($vmid, 'qom-list', path => '/machine/peripheral');
+    return scalar(grep { $_->{name} eq 'usbdisk-xhci' } $devices->@*) ? 1 : 0;
+}
+
+sub needs_usbdisk_controller {
+    my ($conf, $override) = @_;
+
+    return 1 if grep { /^usbdisk\d+$/ && defined($conf->{$_}) } keys $conf->%*;
+    return $override ? 1 : 0 if defined($override);
+    return 0 if $conf->{template};
+
+    my $hotplug = $conf->{hotplug} // '1';
+    return 1 if $hotplug eq '1';
+    return scalar(grep { $_ eq 'usb' } split_list($hotplug)) ? 1 : 0;
+}
+
+sub print_usbdisk_controller {
+    my ($arch) = @_;
+    my $ports = $PVE::QemuServer::Drive::MAX_USB_DISKS;
+    my $pciaddr = print_pci_addr('usbdisk-xhci', $arch);
+    return "qemu-xhci,id=usbdisk-xhci,p2=$ports,p3=$ports$pciaddr";
+}
+
 sub get_usb_controllers {
-    my ($conf, $arch, $machine_version) = @_;
+    my ($conf, $arch, $machine_version, $force_usbdisk_controller) = @_;
 
     my $devices = [];
     my $pciaddr = "";
@@ -163,6 +206,11 @@ sub get_usb_controllers {
         push @$devices, '-device', print_qemu_xhci_controller($pciaddr, xhci_controller_id($conf));
     } elsif ($use_usb3) {
         push @$devices, '-device', "nec-usb-xhci,id=xhci$pciaddr";
+    }
+
+    if (needs_usbdisk_controller($conf, $force_usbdisk_controller)) {
+        # Keep storage ports separate from host USB, SPICE redirection and input devices.
+        push @$devices, '-device', print_usbdisk_controller($arch);
     }
 
     return @$devices;

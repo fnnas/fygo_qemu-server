@@ -293,6 +293,7 @@ sub get_pci_addr_map {
         'scsihw3' => { bus => 4, addr => 2 },
         'scsihw4' => { bus => 4, addr => 3 },
         (map { ("nvme$_" => { bus => 4, addr => 4 + $_ }) } 0 .. 15),
+        'usbdisk-xhci' => { bus => 4, addr => 20 },
         (map { ("sdhci-emmc$_" => { bus => 4, addr => 21 + $_ }) } 0 .. 3),
         (map { ("sdhci-sdcard$_" => { bus => 4, addr => 25 + $_ }) } 0 .. 3),
         }
@@ -944,7 +945,8 @@ sub reserve_pci_usage {
 # Returns a list of bridge devices which are necessary for the remaining
 # devices.
 sub get_pci_bridges {
-    my ($conf, $arch, $q35, $max_scsihw, $version_guard, $multifunction) = @_;
+    my ($conf, $arch, $q35, $max_scsihw, $version_guard, $multifunction, $force_usbdisk_controller)
+        = @_;
 
     my $bridges = {
         # 0 => 1, always present
@@ -956,9 +958,9 @@ sub get_pci_bridges {
 
     # some scsi controllers can only have 7 scsi disks per controller,
     # so scsi14 and upwards need scsihw2,3,4 which live on bridge 4
-    $bridges->{4} = 1 if $max_scsihw > 1 || $version_guard->(11, 1);
+    $bridges->{4} = 1 if $max_scsihw > 1 || $version_guard->(11, 1) || $force_usbdisk_controller;
     $bridges->{4} = 1
-        if grep { /^(?:nvme|emmc|sdcard)\d+$/ && defined($conf->{$_}) } keys $conf->%*;
+        if grep { /^(?:nvme|usbdisk|emmc|sdcard)\d+$/ && defined($conf->{$_}) } keys $conf->%*;
 
     # use cheap legacy igd check instead of a full parse_hostpci
     my $legacy_igd = 0;

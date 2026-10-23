@@ -1,6 +1,9 @@
 all: test
 
-test: test_snapshot test_cfg_to_cmd test_cfg_to_cmd_aarch64 test_pci_addr_conflicts test_pci_reservation test_qemu_img_convert test_migration test_restore_config test_parse_config test_nvme test_emmc test_sdcard test_custom_machine test_vfio_display test_display_types
+test: test_qmp_client test_snapshot test_cfg_to_cmd test_cfg_to_cmd_aarch64 test_pci_addr_conflicts test_pci_reservation test_qemu_img_convert test_migration test_restore_config test_parse_config test_nvme test_usbdisk test_emmc test_sdcard test_custom_machine test_vfio_display test_display_types
+
+test_qmp_client: run_qmp_client_tests.pl
+	perl -I../ ./run_qmp_client_tests.pl
 
 test_snapshot: run_snapshot_tests.pl
 	./run_snapshot_tests.pl
@@ -40,6 +43,15 @@ test_nvme: run_nvme_tests.pl run_nvme_feature_tests.pl run_nvme_lifecycle_tests.
 	perl -I../ ./run_nvme_lifecycle_tests.pl
 	perl -I../ ./run_nvme_update_tests.pl
 	perl -I../ ./run_nvme_pi_tests.pl
+
+test_usbdisk: run_usbdisk_tests.pl run_usbdisk_lifecycle_tests.pl run_usbdisk_reassign_tests.pl run_usbdisk_move_tests.pl run_usbdisk_hotplug_tests.pl run_usbdisk_replacement_tests.pl run_usbdisk_limits_tests.pl
+	perl -I../ ./run_usbdisk_tests.pl
+	perl -I../ ./run_usbdisk_lifecycle_tests.pl
+	perl -I../ ./run_usbdisk_reassign_tests.pl
+	perl -I../ ./run_usbdisk_move_tests.pl
+	perl -I../ ./run_usbdisk_hotplug_tests.pl
+	perl -I../ ./run_usbdisk_replacement_tests.pl
+	perl -I../ ./run_usbdisk_limits_tests.pl
 
 test_emmc: run_emmc_tests.pl run_emmc_lifecycle_tests.pl run_emmc_snapshot_tests.pl
 	perl -I../ ./run_emmc_tests.pl

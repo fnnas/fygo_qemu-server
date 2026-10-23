@@ -2,6 +2,8 @@ package PVE::QemuServer::QMPHelpers;
 
 use v5.36;
 
+use Encode qw(decode FB_CROAK);
+
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 
@@ -31,9 +33,22 @@ sub get_running_qemu_version($vmid) {
 }
 
 sub qemu_deviceadd($vmid, $devicefull) {
+    # Command-line device options contain bytes (including URL-decoded disk
+    # identifiers), while QMP JSON strings contain characters.
+    $devicefull = decode('UTF-8', $devicefull, FB_CROAK) if !utf8::is_utf8($devicefull);
     $devicefull = "driver=" . $devicefull;
+    # HMP expects the complete property list as a single argument. Serial
+    # numbers may contain URL-decoded whitespace, quotes or backslashes.
+    $devicefull =~ s/([\\"])/\\$1/g;
+    $devicefull =~ s/\n/\\n/g;
+    $devicefull =~ s/\r/\\r/g;
 
-    PVE::QemuServer::Monitor::hmp_cmd($vmid, "device_add $devicefull", 25);
+    my $result = PVE::QemuServer::Monitor::hmp_cmd($vmid, "device_add \"$devicefull\"", 25);
+    # HMP returns device realization errors as text inside a successful QMP
+    # response. Do not mistake that response for a successful device_add.
+    die "adding device failed: $result\n" if $result ne '';
+
+    return $result;
 }
 
 sub qemu_devicedel($vmid, $deviceid) {

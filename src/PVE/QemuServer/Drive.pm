@@ -6,6 +6,7 @@ use warnings;
 use IO::File;
 use List::Util qw(first);
 use Storable qw(dclone);
+use URI::Escape qw(uri_unescape);
 
 use PVE::JSONSchema qw(get_standard_option);
 use PVE::RESTEnvironment qw(log_warn);
@@ -160,6 +161,7 @@ our $MAX_SCSI_DISKS = 31;
 my $MAX_VIRTIO_DISKS = 16;
 our $MAX_SATA_DISKS = 6;
 my $MAX_NVME_DISKS = 16;
+our $MAX_USB_DISKS = 8;
 our $MAX_EMMC_DISKS = 4;
 our $MAX_SDCARD_DISKS = 4;
 our $MAX_UNUSED_DISKS = 256;
@@ -353,6 +355,9 @@ my %wwn_fmt = (
 
 my %nvme_sub_fmt = PVE::QemuServer::NVMe::option_schema()->%*;
 
+# QEMU's throttle_is_valid() uses this bound for rates and burst capacities.
+my $MAX_THROTTLE_VALUE = 1_000_000_000_000_000;
+
 my $add_throttle_desc = sub {
     my ($key, $type, $what, $unit, $longunit, $minimum) = @_;
     my $d = {
@@ -361,7 +366,11 @@ my $add_throttle_desc = sub {
         description => "Maximum $what in $longunit.",
         optional => 1,
     };
-    $d->{minimum} = $minimum if defined($minimum);
+    $d->{minimum} = $minimum // 0;
+    $d->{maximum} =
+        $key =~ /_max_length$/ ? 0xffff_ffff
+        : $key =~ /^mbps/ ? $MAX_THROTTLE_VALUE / (1024 * 1024)
+        : $MAX_THROTTLE_VALUE;
     $drivedesc_base{$key} = $d;
 };
 # throughput: (leaky bucket)
@@ -505,6 +514,31 @@ my $nvmedesc = {
     description => "Use volume as NVMe hard disk (n is 0 to " . ($MAX_NVME_DISKS - 1) . ").",
 };
 PVE::JSONSchema::register_standard_option("pve-qm-nvme", $nvmedesc);
+
+my %usbdisk_sub_fmt = (
+    removable => {
+        type => 'boolean',
+        description => "Whether to expose the USB disk as removable media.",
+        default => 1,
+        optional => 1,
+    },
+);
+
+my $usbdisk_fmt = {
+    %drivedesc_base,
+    %readonly_fmt,
+    %usbdisk_sub_fmt,
+    media => { %{ $drivedesc_base{media} }, enum => ['disk'] },
+};
+my $usbdiskdesc = {
+    optional => 1,
+    type => 'string',
+    format => $usbdisk_fmt,
+    description => "Use volume as USB storage (n is 0 to "
+        . ($MAX_USB_DISKS - 1)
+        . "). Uses a dedicated USB 3 controller, independent of USB passthrough.",
+};
+PVE::JSONSchema::register_standard_option("pve-qm-usbdisk", $usbdiskdesc);
 
 my %emmc_sub_fmt = (
     cid => {
@@ -732,6 +766,7 @@ my $alldrive_fmt = {
     %iothread_fmt,
     %model_fmt,
     %nvme_sub_fmt,
+    %usbdisk_sub_fmt,
     %emmc_sub_fmt,
     %sdcard_sub_fmt,
     %product_fmt,
@@ -836,6 +871,11 @@ for (my $i = 0; $i < $MAX_NVME_DISKS; $i++) {
     $drivedesc_hash_with_alloc->{"nvme$i"} = $desc_with_alloc->('nvme', $nvmedesc);
 }
 
+for (my $i = 0; $i < $MAX_USB_DISKS; $i++) {
+    $drivedesc_hash->{"usbdisk$i"} = $usbdiskdesc;
+    $drivedesc_hash_with_alloc->{"usbdisk$i"} = $desc_with_alloc->('usbdisk', $usbdiskdesc);
+}
+
 for (my $i = 0; $i < $MAX_EMMC_DISKS; $i++) {
     $drivedesc_hash->{"emmc$i"} = $emmcdesc;
     $drivedesc_hash_with_alloc->{"emmc$i"} = $desc_with_alloc->('emmc', $emmcdesc);
@@ -869,6 +909,7 @@ sub valid_drive_names {
         (map { "virtio$_" } (0 .. ($MAX_VIRTIO_DISKS - 1))),
         (map { "sata$_" } (0 .. ($MAX_SATA_DISKS - 1))),
         (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
+        (map { "usbdisk$_" } (0 .. ($MAX_USB_DISKS - 1))),
         (map { "emmc$_" } (0 .. ($MAX_EMMC_DISKS - 1))),
         (map { "sdcard$_" } (0 .. ($MAX_SDCARD_DISKS - 1))),
         'efidisk0',
@@ -1010,7 +1051,7 @@ sub parse_drive {
     $res->{index} = $index;
 
     return
-        if ($interface =~ m/^(?:nvme|emmc|sdcard)$/)
+        if ($interface =~ m/^(?:nvme|usbdisk|emmc|sdcard)$/)
         && ($res->{file} eq 'none' || $res->{file} eq 'cdrom' || drive_is_cloudinit($res));
 
     if ($interface eq 'emmc') {
@@ -1037,15 +1078,28 @@ sub parse_drive {
         }
     }
 
+    # QMP accepts embedded NULs, but a cold start passes these decoded values
+    # through argv, which cannot represent them. Reject before allocating a
+    # disk or recording a configuration that only works until the next restart.
+    for my $name (qw(serial model)) {
+        if (defined($res->{$name}) && uri_unescape($res->{$name}) =~ /\0/) {
+            warn "drive $name must not contain NUL bytes\n";
+            return;
+        }
+    }
+
     my $error = 0;
     foreach my $opt (qw(bps bps_rd bps_wr)) {
-        if (my $bps = defined(delete $res->{$opt})) {
+        if (defined(my $bps = delete $res->{$opt})) {
             if (defined($res->{"m$opt"})) {
                 warn "both $opt and m$opt specified\n";
                 ++$error;
                 next;
             }
-            $res->{"m$opt"} = sprintf("%.3f", $bps / (1024 * 1024.0));
+            # Division by 2**20 has a terminating decimal with at most 20
+            # places. Preserve byte precision, including rates below 1 KiB/s.
+            $res->{"m$opt"} = sprintf('%.20f', $bps / (1024 * 1024));
+            $res->{"m$opt"} =~ s/\.?0+$//;
         }
     }
 
@@ -1054,9 +1108,9 @@ sub parse_drive {
         [mbps_max => 'mbps'],
         [mbps_rd_max => 'mbps_rd'],
         [mbps_wr_max => 'mbps_wr'],
-        [miops_max => 'miops'],
-        [miops_rd_max => 'miops_rd'],
-        [miops_wr_max => 'miops_wr'],
+        [iops_max => 'iops'],
+        [iops_rd_max => 'iops_rd'],
+        [iops_wr_max => 'iops_wr'],
         [bps_max_length => 'mbps_max'],
         [bps_rd_max_length => 'mbps_rd_max'],
         [bps_wr_max_length => 'mbps_wr_max'],
@@ -1068,6 +1122,32 @@ sub parse_drive {
         if ($res->{$option} && !$res->{$requires}) {
             warn "$option requires $requires\n";
             ++$error;
+        }
+    }
+
+    for my $family (qw(mbps iops)) {
+        my $unit = $family eq 'mbps' ? 1024 * 1024 : 1;
+        for my $suffix ('', '_rd', '_wr') {
+            my $rate = "$family$suffix";
+            my $burst = "${rate}_max";
+            my $average = int(($res->{$rate} // 0) * $unit);
+            my $maximum = int(($res->{$burst} // 0) * $unit);
+            for my $option ($rate, $burst) {
+                if ($res->{$option} && int($res->{$option} * $unit) == 0) {
+                    warn "$option must specify at least one byte or operation per second\n";
+                    ++$error;
+                }
+            }
+            if ($maximum && $maximum < $average) {
+                warn "$burst cannot be lower than $rate\n";
+                ++$error;
+            }
+            my $length_option = $family eq 'mbps' ? "bps${suffix}_max_length" : "${burst}_length";
+            my $length = $res->{$length_option} // 1;
+            if ($maximum && $maximum > int($MAX_THROTTLE_VALUE / $length)) {
+                warn "$length_option is too high for $burst\n";
+                ++$error;
+            }
         }
     }
 

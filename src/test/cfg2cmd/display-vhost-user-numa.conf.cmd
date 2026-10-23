@@ -21,7 +21,9 @@
   -global 'PIIX4_PM.disable_s4=1' \
   -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pci.0,addr=0x1e' \
   -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pci.0,addr=0x1f' \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
   -device 'piix3-usb-uhci,id=uhci,bus=pci.0,addr=0x1.0x2' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
   -device 'usb-tablet,id=tablet,bus=uhci.0,port=1' \
   -chardev 'socket,id=vgpu,path=/run/qemu-server/8006.vgpu' \
   -device 'vhost-user-gpu-pci,id=vga,bus=pci.0,addr=0x2,chardev=vgpu' \

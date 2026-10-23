@@ -17,9 +17,11 @@
   -m 768 \
   -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pci.0,addr=0x1e' \
   -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pci.0,addr=0x1f' \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
   -device 'vmgenid,guid=c773c261-d800-4348-9f5d-167fadd53cf8' \
   -device 'piix3-usb-uhci,id=uhci,bus=pci.0,addr=0x1.0x2' \
   -device 'qemu-xhci,p2=15,p3=15,id=xhci,bus=pci.1,addr=0x1b' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
   -chardev 'spicevmc,id=usbredirchardev1,name=usbredir' \
   -device 'usb-redir,chardev=usbredirchardev1,id=usbredirdev1,bus=xhci.0,port=2' \
   -chardev 'spicevmc,id=usbredirchardev5,name=usbredir' \

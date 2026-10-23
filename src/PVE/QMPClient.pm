@@ -3,7 +3,6 @@ package PVE::QMPClient;
 use strict;
 use warnings;
 
-use Encode qw();
 use IO::Multiplex;
 use IO::Socket::UNIX;
 use JSON;
@@ -307,21 +306,22 @@ my $check_queue = sub {
                 delete $cmd->{arguments}->{fd};
             }
 
+            # Monitor sockets carry UTF-8 bytes, not Perl character strings.
             my $qmpcmd;
 
             if ($qga) {
 
-                $qmpcmd = to_json({
+                $qmpcmd = encode_json({
                     execute => 'guest-sync-delimited',
                     arguments => { id => int($cmd->{id}) },
                 })
                     . "\n"
-                    . to_json({ execute => $cmd->{execute}, arguments => $cmd->{arguments} })
+                    . encode_json({ execute => $cmd->{execute}, arguments => $cmd->{arguments} })
                     . "\n";
 
             } else {
 
-                $qmpcmd = to_json({
+                $qmpcmd = encode_json({
                     execute => $cmd->{execute},
                     arguments => $cmd->{arguments},
                     id => $cmd->{id},
@@ -431,7 +431,9 @@ sub mux_input {
 
     my $raw;
 
-    if (length(Encode::encode('UTF-8', $$input)) > $MAX_RESPONSE_SIZE) {
+    # The input buffer already contains bytes read from the socket. Encoding
+    # it again overcounts non-ASCII data and copies the growing buffer on each read.
+    if (length($$input) > $MAX_RESPONSE_SIZE) {
         $$input = ''; # Clear the buffer.
         my $peer = $qga ? 'guest agent' : 'QMP';
         my $max_size = PVE::Format::render_bytes($MAX_RESPONSE_SIZE);
@@ -455,7 +457,7 @@ sub mux_input {
 
             die "response is not complete" if @jsons != 2;
 
-            my $obj = from_json($jsons[0]);
+            my $obj = decode_json($jsons[0]);
 
             my $cmdid = $obj->{'return'};
             die "received response without command id\n" if !$cmdid;
@@ -469,7 +471,7 @@ sub mux_input {
 
             delete $queue_info->{current};
 
-            $obj = from_json($jsons[1]);
+            $obj = decode_json($jsons[1]);
 
             if (my $callback = $curcmd->{callback}) {
                 &$callback($id, $obj);
@@ -479,7 +481,7 @@ sub mux_input {
         }
 
         foreach my $json (@jsons) {
-            my $obj = from_json($json);
+            my $obj = decode_json($json);
             next if defined($obj->{QMP}); # skip monitor greeting
 
             if (exists($obj->{error}->{desc})) {
@@ -549,7 +551,7 @@ sub mux_eof {
         my $raw = $1;
 
         eval {
-            my $obj = from_json($raw);
+            my $obj = decode_json($raw);
 
             my $cmdid = $obj->{'return'};
             die "received response without command id\n" if !$cmdid;

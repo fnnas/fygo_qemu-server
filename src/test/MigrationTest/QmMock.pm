@@ -148,7 +148,13 @@ $MigrationTest::Shared::storage_module->mock(
 
 $MigrationTest::Shared::qemu_server_module->mock(
     config_to_command => sub {
-        my (undef, undef, $conf) = @_;
+        my (undef, undef, $conf, undef, $options) = @_;
+        my $source_status = decode_json(file_get_contents("${RUN_DIR_PATH}/vm_status"));
+        die "USB storage controller absence was not preserved\n"
+            if !defined($options->{'force-usbdisk-controller'})
+            && !grep { /^usbdisk\d+$/ && defined($conf->{$_}) } keys $conf->%*;
+        die "USB storage controller topology was not preserved\n"
+            if !!$options->{'force-usbdisk-controller'} != !!$source_status->{'usbdisk-controller'};
         my $spice_port = PVE::QemuServer::vga_conf_uses_spice($conf) ? 61000 : undef;
         return (['mocked_kvm_command'], $spice_port, {}, $conf);
     },

@@ -112,7 +112,7 @@ sub check_local_resources {
         if !$state && PVE::QemuServer::vga_is_vhost_user(PVE::QemuServer::parse_vga($conf->{vga}));
 
     foreach my $k (keys %$conf) {
-        if ($k =~ m/^usb/) {
+        if ($k =~ m/^usb\d+$/) {
             my $entry = parse_property_string('pve-qm-usb', $conf->{$k});
             next if $entry->{host} && $entry->{host} =~ m/^spice$/i;
             if (my $name = $entry->{mapping}) {

@@ -222,9 +222,10 @@ sub print_drivedevice_full {
         ) // $pciaddr;
         $device = "nvme,id=$drive_id,drive=drive-$drive_id$pciaddr";
         $device .= PVE::QemuServer::NVMe::controller_options($drive);
-    } elsif ($drive->{interface} eq 'usb') {
-        die "implement me";
-        #  -device ide-drive,bus=ide.1,unit=0,drive=drive-ide0-1-0,id=ide0-1-0
+    } elsif ($drive->{interface} eq 'usbdisk') {
+        my $port = $drive->{index} + 1;
+        $device = "usb-storage,id=$drive_id,drive=drive-$drive_id,bus=usbdisk-xhci.0,port=$port";
+        $device .= ',removable=' . (($drive->{removable} // 1) ? 'on' : 'off');
     } else {
         die "unsupported interface type";
     }
@@ -239,6 +240,7 @@ sub print_drivedevice_full {
             $drive->{interface} eq 'nvme'
             && !PVE::QemuServer::Machine::machine_type_is_custom($conf)
         )
+        || $drive->{interface} eq 'usbdisk'
     ) {
         $device .= ",serial=$drive_id";
     }

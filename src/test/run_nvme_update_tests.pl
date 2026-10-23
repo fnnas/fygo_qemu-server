@@ -563,7 +563,7 @@ for my $async (0, 1) {
 }
 
 for my $async (0, 1) {
-    for my $bus (qw(nvme emmc virtio scsi sata ide)) {
+    for my $bus (qw(nvme usbdisk emmc virtio scsi sata ide)) {
         $reset->($cases[0]);
         $running = 0;
         my $disk = "${bus}0";
@@ -620,7 +620,7 @@ my $check_boot_update = sub {
 for my $async (0, 1) {
     for my $is_running (0, 1) {
         $running = $is_running;
-        for my $bus (qw(nvme virtio scsi sata ide)) {
+        for my $bus (qw(nvme usbdisk virtio scsi sata ide)) {
             my @disks = map { "${bus}$_" } (0, 1, 2);
             my @boot_cases = (
                 {
@@ -740,7 +740,7 @@ my $reject_boot_update = sub {
 for my $async (0, 1) {
     for my $is_running (0, 1) {
         $running = $is_running;
-        for my $bus (qw(nvme virtio scsi sata ide)) {
+        for my $bus (qw(nvme usbdisk virtio scsi sata ide)) {
             my $disk = "${bus}0";
             $reset->($cases[0]);
             $conf = {
@@ -802,19 +802,19 @@ for my $async (0, 1) {
             'a disk added in the same request can be enabled for boot',
         );
 
-        for my $revert ('boot,nvme0,virtio0', 'virtio0,nvme0,boot') {
+        for my $revert ('boot,nvme0,usbdisk0', 'usbdisk0,nvme0,boot') {
             $reset->($cases[0]);
             $conf = {
                 nvme0 => "$owner_volume,size=$size",
-                virtio0 => "$child_volume,size=$size",
-                boot => 'order=nvme0;virtio0',
+                usbdisk0 => "$child_volume,size=$size",
+                boot => 'order=nvme0;usbdisk0',
                 hotplug => '0',
-                pending => { delete => 'nvme0,virtio0', boot => '' },
+                pending => { delete => 'nvme0,usbdisk0', boot => '' },
             };
             $check_boot_update->(
                 $async,
                 { revert => $revert },
-                'order=nvme0;virtio0',
+                'order=nvme0;usbdisk0',
                 'boot order and disk deletions can be reverted together',
             );
             is_deeply($conf->{pending}, {}, 'combined revert clears all selected pending changes');
@@ -880,7 +880,7 @@ is_deeply($conf, $raced_conf, 'locked boot validation preserves the concurrent d
         sub { return { scsi0 => { inserted => { 'node-name' => 'drive-scsi0' } } }; });
     $blockdev->mock(mon_cmd => sub { push @events, 'notify'; });
 
-    for my $bus (qw(nvme emmc virtio scsi sata ide)) {
+    for my $bus (qw(nvme usbdisk emmc virtio scsi sata ide)) {
         my $disk = "${bus}0";
         for my $pending ('same-volume', 'replacement', 'delete', 'force-delete') {
             $reset->($cases[0]);

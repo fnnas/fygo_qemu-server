@@ -24,12 +24,14 @@
   -object '{"id":"throttle-drive-nvme0","limits":{},"qom-type":"throttle-group"}' \
   -object '{"id":"throttle-drive-nvme1","limits":{},"qom-type":"throttle-group"}' \
   -object '{"id":"throttle-drive-nvme2","limits":{},"qom-type":"throttle-group"}' \
+  -object '{"id":"throttle-drive-usbdisk0","limits":{},"qom-type":"throttle-group"}' \
   -object '{"id":"throttle-drive-emmc0","limits":{},"qom-type":"throttle-group"}' \
   -global 'ICH9-LPC.disable_s3=1' \
   -global 'ICH9-LPC.disable_s4=1' \
   -device 'intel-iommu,intremap=on,caching-mode=on' \
   -readconfig /usr/share/qemu-server/pve-azw-me-pro.cfg \
   -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
   -device 'usb-tablet,id=tablet,bus=xhci.0,port=2' \
   -device 'VGA,id=vga,bus=pcie.0,addr=0x1' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
@@ -49,6 +51,8 @@
   -device 'nvme,id=nvme1,drive=drive-nvme1,bus=pcie.00.1c.6,addr=0x0,use-intel-id=on,write-cache=on' \
   -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-5.raw","node-name":"e2c477e06ea80d99b7c4460faf6aab0","read-only":false},"node-name":"f2c477e06ea80d99b7c4460faf6aab0","read-only":false},"node-name":"drive-nvme2","read-only":false,"throttle-group":"throttle-drive-nvme2"}' \
   -device 'nvme,id=nvme2,drive=drive-nvme2,bus=pcie.00.1d.0,addr=0x0,use-intel-id=on,serial=LAB-NVME,write-cache=on' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-6.raw","node-name":"ef93631dc90f14b3ce9b1e49f013cb9","read-only":false},"node-name":"ff93631dc90f14b3ce9b1e49f013cb9","read-only":false},"node-name":"drive-usbdisk0","read-only":false,"throttle-group":"throttle-drive-usbdisk0"}' \
+  -device 'usb-storage,id=usbdisk0,drive=drive-usbdisk0,bus=usbdisk-xhci.0,port=1,removable=on,bootindex=103,serial=usbdisk0,write-cache=on' \
   -device 'sdhci-pci,id=sdhci-emmc0,sd-spec-version=2,bus=pci.4,addr=0x15' \
   -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-7.raw","node-name":"e903389655b8c7c2f220a1799d9fe6b","read-only":false},"node-name":"f903389655b8c7c2f220a1799d9fe6b","read-only":false},"node-name":"drive-emmc0","read-only":false,"throttle-group":"throttle-drive-emmc0"}' \
   -device 'emmc,id=emmc0,drive=drive-emmc0,bus=pci.4/sdhci-emmc0/sd-bus' \

@@ -18,6 +18,7 @@ use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer;
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
+use PVE::QemuServer::USB;
 use PVE::RESTEnvironment qw(log_warn);
 use PVE::Storage;
 use PVE::Tools;
@@ -246,6 +247,7 @@ sub __snapshot_save_vmstate {
     my $runningcpu = PVE::QemuServer::CPUConfig::get_cpu_from_running_vm($pid);
 
     my $nets_host_mtu = PVE::QemuServer::Network::get_nets_host_mtu($vmid, $conf);
+    my $usbdisk_controller = PVE::QemuServer::USB::get_usbdisk_controller_override($vmid, $conf);
 
     # allocate only after querying the running instance, nothing below can fail, so a failed
     # query cannot leave an orphaned state volume behind
@@ -260,6 +262,11 @@ sub __snapshot_save_vmstate {
     $conf->{runningmachine} = $runningmachine;
     $conf->{runningcpu} = $runningcpu;
     $conf->{'running-nets-host-mtu'} = $nets_host_mtu;
+    if (defined($usbdisk_controller)) {
+        $conf->{'running-usbdisk-controller'} = $usbdisk_controller;
+    } else {
+        delete $conf->{'running-usbdisk-controller'};
+    }
 
     return $statefile;
 }
@@ -479,6 +486,8 @@ sub __snapshot_rollback_hook {
         }
 
         $data->{'nets-host-mtu'} = delete($conf->{'running-nets-host-mtu'});
+        $data->{'usbdisk-controller'} = delete($conf->{'running-usbdisk-controller'})
+            // ($snap->{vmstate} ? 0 : undef);
     }
 
     return;
@@ -520,6 +529,7 @@ sub __snapshot_rollback_vm_start {
         forcemachine => $data->{forcemachine},
         forcecpu => $data->{forcecpu},
         'nets-host-mtu' => $data->{'nets-host-mtu'},
+        'usbdisk-controller' => $data->{'usbdisk-controller'},
     };
     PVE::QemuServer::vm_start($storecfg, $vmid, $params);
 }

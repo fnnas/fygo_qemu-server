@@ -12,6 +12,7 @@ use IPC::Open3;
 use JSON;
 use URI::Escape;
 use Socket qw(SOCK_STREAM);
+use Storable qw(dclone);
 
 use PVE::APIClient::LWP;
 use PVE::CGroup;
@@ -2301,6 +2302,8 @@ my $update_vm_api = sub {
                 push @delete, 'runningmachine' if $conf->{runningmachine};
                 push @delete, 'runningcpu' if $conf->{runningcpu};
                 push @delete, 'running-nets-host-mtu' if $conf->{'running-nets-host-mtu'};
+                push @delete, 'running-usbdisk-controller'
+                    if defined($conf->{'running-usbdisk-controller'});
             }
         }
 
@@ -3742,6 +3745,7 @@ __PACKAGE__->register_method({
                 description => 'Whether to migrate conntrack entries for running VMs.',
             },
             'nets-host-mtu' => get_standard_option('pve-qm-nets-host-mtu'),
+            'usbdisk-controller' => get_standard_option('pve-qm-usbdisk-controller'),
         },
     },
     returns => {
@@ -3774,6 +3778,9 @@ __PACKAGE__->register_method({
         my $force_cpu = $get_root_param->('force-cpu');
         my $with_conntrack_state = $get_root_param->('with-conntrack-state');
         my $nets_host_mtu = $get_root_param->('nets-host-mtu');
+        my $usbdisk_controller = $get_root_param->('usbdisk-controller');
+        raise_param_exc({ 'usbdisk-controller' => 'Only root may use this option.' })
+            if defined($usbdisk_controller) && $authuser ne 'root@pam';
 
         my $storagemap;
 
@@ -3863,6 +3870,7 @@ __PACKAGE__->register_method({
                     timeout => $timeout,
                     forcecpu => $force_cpu,
                     'nets-host-mtu' => $nets_host_mtu,
+                    'usbdisk-controller' => $usbdisk_controller,
                 };
 
                 PVE::QemuServer::vm_start($storecfg, $vmid, $params, $migrate_opts);
@@ -4715,7 +4723,8 @@ __PACKAGE__->register_method({
                     || $opt eq 'snapstate'
                     || $opt eq 'runningcpu'
                     || $opt eq 'runningmachine'
-                    || $opt eq 'running-nets-host-mtu';
+                    || $opt eq 'running-nets-host-mtu'
+                    || $opt eq 'running-usbdisk-controller';
 
                 # no need to copy unused images, because VMID(owner) changes anyways
                 next if $opt =~ m/^unused\d+$/;
@@ -5077,6 +5086,15 @@ __PACKAGE__->register_method({
             my ($oldstoreid, $oldvolname) = PVE::Storage::parse_volume_id($old_volid);
             my $oldfmt = (PVE::Storage::parse_volname($storecfg, $old_volid))[6];
 
+            if ($param->{delete}) {
+                my $owner = (PVE::Storage::parse_volname($storecfg, $old_volid))[2];
+                die "Volume '$old_volid' is not owned by VM '$vmid' - cannot delete source\n"
+                    if !defined($owner) || $owner != $vmid;
+            } else {
+                # Reserve metadata capacity before copying or switching a live disk.
+                PVE::QemuConfig->add_unused_volume(dclone($conf), $old_volid);
+            }
+
             die "you can't move to the same storage with same format\n"
                 if $oldstoreid eq $storeid && (!$format || !$oldfmt || $oldfmt eq $format);
 
@@ -5112,6 +5130,29 @@ __PACKAGE__->register_method({
             PVE::Storage::activate_volumes($storecfg, [$drive->{file}]);
 
             my $newvollist = [];
+            my $newdrive;
+            my $source_node;
+            my $copy_complete;
+            my $live_move = $running && $disk !~ /^unused\d+$/ && $disk ne 'tpmstate0';
+            my $qmp_peer = PVE::QemuServer::Monitor::vm_qmp_peer($vmid);
+            my $has_reference = sub {
+                my ($configuration, $volume) = @_;
+                my $found;
+                for my $section (
+                    $configuration,
+                    $configuration->{pending} // {},
+                    values %{ $configuration->{snapshots} // {} },
+                ) {
+                    PVE::QemuConfig->foreach_volume_full(
+                        $section,
+                        { include_unused => 1 },
+                        sub {
+                            $found = 1 if $_[1]->{file} eq $volume;
+                        },
+                    );
+                }
+                return $found;
+            };
 
             eval {
                 local $SIG{INT} = local $SIG{TERM} = local $SIG{QUIT} = local $SIG{HUP} =
@@ -5119,6 +5160,12 @@ __PACKAGE__->register_method({
 
                 warn "moving a referenced disk; other references remain on the source volume\n"
                     if $referenced;
+
+                $source_node = PVE::QemuServer::Blockdev::get_node_name_below_throttle(
+                    $qmp_peer, "drive-$disk", 0,
+                ) if $live_move;
+                die "no source block node found for '$disk'\n"
+                    if $live_move && !defined($source_node);
 
                 my $bwlimit = extract_param($param, 'bwlimit');
                 my $movelimit = PVE::Storage::get_bandwidth_limit(
@@ -5143,7 +5190,7 @@ __PACKAGE__->register_method({
                 $dest_info->{efisize} = PVE::QemuServer::get_efivars_size($conf)
                     if $disk eq 'efidisk0';
 
-                my $newdrive = PVE::QemuServer::clone_disk(
+                $newdrive = PVE::QemuServer::clone_disk(
                     $storecfg,
                     $source_info,
                     $dest_info,
@@ -5154,11 +5201,13 @@ __PACKAGE__->register_method({
                     $conf->{agent},
                     $movelimit,
                 );
+                $copy_complete = 1;
                 $conf->{$disk} = PVE::QemuServer::print_drive($newdrive);
 
                 if (!$param->{delete}) {
                     my $unused_key = PVE::QemuConfig->add_unused_volume($conf, $old_volid);
-                    print("adding source volume '$old_volid' as '$unused_key' to config\n");
+                    print("adding source volume '$old_volid' as '$unused_key' to config\n")
+                        if defined($unused_key);
                 }
 
                 # convert moved disk to base if part of template
@@ -5181,6 +5230,55 @@ __PACKAGE__->register_method({
             };
             if (my $err = $@) {
                 foreach my $volid (@$newvollist) {
+                    my ($latest, $referenced, $active, $busy, $unknown);
+                    eval {
+                        $latest = PVE::QemuConfig->load_config($vmid);
+                        $referenced = $has_reference->($latest, $volid);
+                    };
+                    $unknown = 1 if $@;
+                    if ($live_move && defined($source_node)) {
+                        $active = $copy_complete;
+                        eval {
+                            my $current =
+                                PVE::QemuServer::Blockdev::get_node_name_below_throttle(
+                                    $qmp_peer, "drive-$disk", 0,
+                                );
+                            $active = $current ne $source_node;
+                            my $jobs =
+                                PVE::QemuServer::Monitor::qmp_cmd($qmp_peer, 'query-block-jobs');
+                            $busy = grep {
+                                $_->{device} eq "mirror-$disk" || $_->{device} eq "drive-$disk"
+                            } @$jobs;
+                        };
+                        $unknown = 1 if $@;
+                    }
+                    if ($referenced || $active || $busy || $unknown) {
+                        # A mirror can already have switched QEMU, or a write can
+                        # have persisted before reporting an error. Neither volume
+                        # may be deleted until its actual references are known.
+                        eval {
+                            my $recovery = $latest // dclone($conf);
+                            if ($active) {
+                                my $recovered_drive = $newdrive // { %$drive, file => $volid };
+                                delete $recovered_drive->{format};
+                                $recovery->{$disk} =
+                                    PVE::QemuServer::print_drive($recovered_drive);
+                                eval {
+                                    PVE::QemuConfig->add_unused_volume($recovery, $old_volid);
+                                };
+                                warn
+                                    "source volume '$old_volid' retained without an unused entry - $@"
+                                    if $@;
+                            } elsif (!$has_reference->($recovery, $volid)) {
+                                PVE::QemuConfig->add_unused_volume($recovery, $volid);
+                            }
+                            PVE::QemuConfig->write_config($vmid, $recovery);
+                        };
+                        warn "unable to record retained destination '$volid' - $@" if $@;
+                        warn
+                            "retaining destination volume '$volid' after failed storage migration\n";
+                        next;
+                    }
                     eval { PVE::Storage::vdisk_free($storecfg, $volid) };
                     warn $@ if $@;
                 }
@@ -5211,6 +5309,7 @@ __PACKAGE__->register_method({
 
             my $source_conf = PVE::QemuConfig->load_config($vmid);
             PVE::QemuConfig->check_lock($source_conf);
+            PVE::QemuConfig->check_protection($source_conf, "can't remove drive '$disk'");
             my $target_conf = PVE::QemuConfig->load_config($target_vmid);
             PVE::QemuConfig->check_lock($target_conf);
 
@@ -5256,6 +5355,10 @@ __PACKAGE__->register_method({
 
             $rpcenv->check($authuser, "/storage/$storeid", ['Datastore.AllocateSpace']);
 
+            my $owner = (PVE::Storage::parse_volname($storecfg, $source_volid))[2];
+            die "Volume '$source_volid' is not owned by VM '$vmid' - cannot reassign\n"
+                if !defined($owner) || $owner != $vmid;
+
             die "Can't move disk referenced by other configuration or snapshots to another VM\n"
                 if PVE::QemuServer::Drive::is_volume_in_use(
                     $storecfg, $source_conf, $disk, $source_volid,
@@ -5275,8 +5378,16 @@ __PACKAGE__->register_method({
                     $target_disk, $source_volid,
                 );
             } else {
+                my $target_value = $source_conf->{$disk};
+                if ($drive->{interface} eq 'usbdisk' && $target_disk !~ /^usbdisk\d+$/) {
+                    # Removable media policy is specific to the USB frontend.
+                    # Keep common options (including write protection) for the
+                    # target schema to validate before any storage changes.
+                    delete $drive->{removable};
+                    $target_value = PVE::QemuServer::print_drive($drive);
+                }
                 $drive = PVE::QemuServer::parse_drive(
-                    $target_disk, $source_conf->{$disk},
+                    $target_disk, $target_value,
                 );
             }
             die "failed to parse source disk for target disk format - $@\n" if !$drive;
@@ -5324,24 +5435,28 @@ __PACKAGE__->register_method({
         };
 
         my $disk_reassignfn = sub {
+            # Opposite transfers must not each hold their source lock while
+            # waiting for the other's target lock.
+            my ($first_vmid, $second_vmid) = sort { $a <=> $b } ($vmid, $target_vmid);
             return PVE::QemuConfig->lock_config(
-                $vmid,
+                $first_vmid,
                 sub {
                     return PVE::QemuConfig->lock_config(
-                        $target_vmid,
+                        $second_vmid,
                         sub {
                             my ($source_conf, $target_conf, $drive) =
                                 &$load_and_check_reassign_configs();
 
                             my $source_volid = $drive->{file};
+                            my $original_source = dclone($source_conf);
 
                             print("reassign disk '$disk' from VM '$vmid' as '$target_disk' to"
                                 . " VM '$target_vmid'\n");
                             my ($storeid, $source_volname) =
                                 PVE::Storage::parse_volume_id($source_volid);
 
-                            my $fmt =
-                                (PVE::Storage::parse_volname($storecfg, $source_volid))[6];
+                            my $source_image =
+                                (PVE::Storage::parse_volname($storecfg, $source_volid))[1];
 
                             my $new_volid = PVE::Storage::rename_volume(
                                 $storecfg, $source_volid, $target_vmid,
@@ -5349,62 +5464,130 @@ __PACKAGE__->register_method({
 
                             $drive->{file} = $new_volid;
 
-                            # An explicit order can contain initially detached namespaces.
-                            # Preserve those entries when removing the reassigned disk.
-                            my $bootcfg =
-                                defined($source_conf->{boot})
-                                ? PVE::JSONSchema::parse_property_string(
-                                    'pve-qm-boot', $source_conf->{boot},
-                                )
-                                : undef;
-                            my @boot_devs;
-                            if (defined($bootcfg) && !$bootcfg->{legacy}) {
-                                @boot_devs = PVE::Tools::split_list($bootcfg->{order} // '');
-                            } else {
-                                my $boot_order =
-                                    PVE::QemuServer::device_bootorder($source_conf);
-                                @boot_devs = sort { $boot_order->{$a} <=> $boot_order->{$b} }
-                                    keys %$boot_order;
-                            }
-                            if (grep { $_ eq $disk } @boot_devs) {
-                                print "removing disk '$disk' from boot order config\n";
-                                @boot_devs = grep { $_ ne $disk } @boot_devs;
-                                $source_conf->{boot} =
-                                    PVE::QemuServer::print_bootorder(\@boot_devs);
-                            }
-
-                            # Preserve a separately staged boot order, removing only
-                            # the disk which is no longer part of this VM.
-                            if (defined(my $boot = $source_conf->{pending}->{boot})) {
+                            eval {
+                                # An explicit order can contain initially detached namespaces.
+                                # Preserve those entries when removing the reassigned disk.
                                 my $bootcfg =
-                                    PVE::JSONSchema::parse_property_string('pve-qm-boot', $boot);
-                                my @devs = PVE::Tools::split_list($bootcfg->{order} // '');
-                                if (grep { $_ eq $disk } @devs) {
-                                    @devs = grep { $_ ne $disk } @devs;
-                                    $source_conf->{pending}->{boot} =
-                                        PVE::QemuServer::print_bootorder(\@devs);
+                                    defined($source_conf->{boot})
+                                    ? PVE::JSONSchema::parse_property_string(
+                                        'pve-qm-boot', $source_conf->{boot},
+                                    )
+                                    : undef;
+                                my @boot_devs;
+                                if (defined($bootcfg) && !$bootcfg->{legacy}) {
+                                    @boot_devs =
+                                        PVE::Tools::split_list($bootcfg->{order} // '');
+                                } else {
+                                    my $boot_order =
+                                        PVE::QemuServer::device_bootorder($source_conf);
+                                    @boot_devs =
+                                        sort { $boot_order->{$a} <=> $boot_order->{$b} }
+                                        keys %$boot_order;
                                 }
-                            }
+                                if (grep { $_ eq $disk } @boot_devs) {
+                                    print "removing disk '$disk' from boot order config\n";
+                                    @boot_devs = grep { $_ ne $disk } @boot_devs;
+                                    $source_conf->{boot} =
+                                        PVE::QemuServer::print_bootorder(\@boot_devs);
+                                }
 
-                            delete $source_conf->{$disk};
-                            print "removing disk '${disk}' from VM '${vmid}' config\n";
-                            PVE::QemuConfig->write_config($vmid, $source_conf);
+                                # Preserve a separately staged boot order, removing only
+                                # the disk which is no longer part of this VM.
+                                if (defined(my $boot = $source_conf->{pending}->{boot})) {
+                                    my $bootcfg =
+                                        PVE::JSONSchema::parse_property_string('pve-qm-boot',
+                                            $boot);
+                                    my @devs = PVE::Tools::split_list($bootcfg->{order} // '');
+                                    if (grep { $_ eq $disk } @devs) {
+                                        @devs = grep { $_ ne $disk } @devs;
+                                        $source_conf->{pending}->{boot} =
+                                            PVE::QemuServer::print_bootorder(\@devs);
+                                    }
+                                }
 
-                            my $drive_string = PVE::QemuServer::print_drive($drive);
+                                delete $source_conf->{$disk};
+                                print "removing disk '${disk}' from VM '${vmid}' config\n";
+                                PVE::QemuConfig->write_config($vmid, $source_conf);
 
-                            if ($target_disk =~ /^unused\d+$/) {
-                                $target_conf->{$target_disk} = $drive_string;
-                                PVE::QemuConfig->write_config($target_vmid, $target_conf);
-                            } else {
-                                &$update_vm_api(
-                                    {
-                                        node => $node,
-                                        vmid => $target_vmid,
-                                        digest => $target_digest,
-                                        $target_disk => $drive_string,
-                                    },
-                                    1,
-                                );
+                                my $drive_string = PVE::QemuServer::print_drive($drive);
+
+                                if ($target_disk =~ /^unused\d+$/) {
+                                    $target_conf->{$target_disk} = $drive_string;
+                                    PVE::QemuConfig->write_config($target_vmid, $target_conf);
+                                } else {
+                                    &$update_vm_api(
+                                        {
+                                            node => $node,
+                                            vmid => $target_vmid,
+                                            digest => $target_digest,
+                                            $target_disk => $drive_string,
+                                        },
+                                        1,
+                                    );
+                                }
+                            };
+                            if (my $err = $@) {
+                                eval {
+                                    my $current_target =
+                                        PVE::QemuConfig->load_config($target_vmid);
+                                    my $referenced;
+                                    for my $config (
+                                        $current_target,
+                                        $current_target->{pending} // {},
+                                        values %{ $current_target->{snapshots} // {} },
+                                    ) {
+                                        PVE::QemuConfig->foreach_volume_full(
+                                            $config,
+                                            { include_unused => 1 },
+                                            sub {
+                                                $referenced = 1 if $_[1]->{file} eq $new_volid;
+                                            },
+                                        );
+                                    }
+                                    if ($referenced) {
+                                        # The API saves pending config before hotplugging. A
+                                        # later error must not rename a possibly active disk.
+                                        warn
+                                            "volume '$new_volid' remains referenced by VM '$target_vmid' after failed reassignment\n";
+                                    } else {
+                                        my $restored_volid;
+                                        eval {
+                                            $restored_volid = PVE::Storage::rename_volume(
+                                                $storecfg, $new_volid, $vmid, $source_image,
+                                            );
+                                        };
+                                        if (my $rename_error = $@) {
+                                            # If storage rollback fails, retain a discoverable
+                                            # reference under the volume's current owner.
+                                            my $unused = PVE::QemuConfig->add_unused_volume(
+                                                $current_target, $new_volid,
+                                            );
+                                            PVE::QemuConfig->write_config(
+                                                $target_vmid, $current_target,
+                                            );
+                                            PVE::QemuConfig->write_config($vmid, $source_conf);
+                                            warn
+                                                "unable to return volume '$new_volid' to VM '$vmid': $rename_error"
+                                                . "volume retained as VM '$target_vmid' disk '$unused'\n";
+                                        } else {
+                                            if ($restored_volid ne $source_volid) {
+                                                my $old_drive = PVE::QemuServer::parse_drive(
+                                                    $disk,
+                                                    $original_source->{$disk},
+                                                );
+                                                $old_drive->{file} = $restored_volid;
+                                                $original_source->{$disk} =
+                                                    PVE::QemuServer::print_drive($old_drive);
+                                            }
+                                            PVE::QemuConfig->write_config(
+                                                $vmid, $original_source,
+                                            );
+                                        }
+                                    }
+                                };
+                                warn "unable to recover reassigned volume '$new_volid' - $@"
+                                    if $@;
+                                die $err;
                             }
 
                             # remove possible replication snapshots
@@ -7093,6 +7276,8 @@ __PACKAGE__->register_method({
                             },
                             skiplock => get_standard_option('skiplock'), # could stop setting it with a capability check
                             'nets-host-mtu' => get_standard_option('pve-qm-nets-host-mtu'),
+                            'usbdisk-controller' =>
+                                get_standard_option('pve-qm-usbdisk-controller'),
                         },
                         additionalProperties => 0,
                     },

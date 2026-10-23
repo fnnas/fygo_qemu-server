@@ -462,6 +462,9 @@ sub blockdev_mirror {
     # Copy original drive config (aio, cache, discard, ...):
     my $dest_drive = dclone($source->{drive});
     delete($dest_drive->{format}); # cannot use the source's format
+    # The copy job must write the target even when the source is exposed
+    # read-only. The original frontend retains its write protection.
+    delete($dest_drive->{ro});
     $dest_drive->{file} = $dest->{volid};
 
     # Mirror happens below the throttle filter, so if the target is for the same VM, it will end up
@@ -510,9 +513,9 @@ sub blockdev_mirror {
     eval { mon_cmd($vmid, "blockdev-mirror", $qmp_opts->%*); };
     if (my $err = $@) {
         eval { qemu_blockjobs_cancel(vm_qmp_peer($vmid), $jobs) };
-        log_warn("unable to cancel block jobs - $@");
+        log_warn("unable to cancel block jobs - $@") if $@;
         eval { PVE::QemuServer::Blockdev::detach(vm_qmp_peer($vmid), $target_node_name); };
-        log_warn("unable to delete blockdev '$target_node_name' - $@");
+        log_warn("unable to delete blockdev '$target_node_name' - $@") if $@;
         die "error starting blockdev mirrror - $err";
     }
     monitor(

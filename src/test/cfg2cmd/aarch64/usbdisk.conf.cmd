@@ -1,0 +1,39 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -object 'monitor-qmp,chardev=qmp,id=monitor-qmp' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -object 'monitor-qmp,chardev=qmp-event,id=monitor-qmp-event' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu host \
+  -m 512 \
+  -object '{"id":"throttle-drive-usbdisk0","limits":{},"qom-type":"throttle-group"}' \
+  -object '{"id":"throttle-drive-usbdisk7","limits":{},"qom-type":"throttle-group"}' \
+  -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pcie.0,addr=0x1e' \
+  -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pcie.0,addr=0x1f' \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'usb-ehci,id=ehci,bus=pcie.0,addr=0x1' \
+  -device 'qemu-xhci,p2=15,p3=15,id=xhci,bus=pci.1,addr=0x1b' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
+  -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
+  -device 'usb-kbd,id=keyboard,bus=ehci.0,port=2' \
+  -device 'usb-host,bus=xhci.0,port=1,vendorid=0x1234,productid=0x5678,id=usb0' \
+  -device 'virtio-gpu,id=vga,bus=pcie.0,addr=0x2' \
+  -device 'virtio-serial,id=spice,bus=pcie.0,addr=0x9' \
+  -chardev 'spicevmc,id=vdagent,name=vdagent' \
+  -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
+  -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -blockdev '{"detect-zeroes":"unmap","discard":"unmap","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"unmap","discard":"unmap","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"unmap","discard":"unmap","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"e6bca53126557afffc0c10a04e24423","read-only":false},"node-name":"f6bca53126557afffc0c10a04e24423","read-only":false},"node-name":"drive-usbdisk0","read-only":false,"throttle-group":"throttle-drive-usbdisk0"}' \
+  -device 'usb-storage,id=usbdisk0,drive=drive-usbdisk0,bus=usbdisk-xhci.0,port=1,removable=on,bootindex=100,serial=usbdisk0,write-cache=on' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"qcow2","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-1.qcow2","node-name":"e7994fb7fc66a28165f1b32c104ecb5","read-only":true},"node-name":"f7994fb7fc66a28165f1b32c104ecb5","read-only":true},"node-name":"drive-usbdisk7","read-only":true,"throttle-group":"throttle-drive-usbdisk7"}' \
+  -device 'usb-storage,id=usbdisk7,drive=drive-usbdisk7,bus=usbdisk-xhci.0,port=8,removable=off,serial=usbdisk7,write-cache=on' \
+  -machine 'type=virt+pve0'

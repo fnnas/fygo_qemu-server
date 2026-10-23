@@ -21,6 +21,7 @@
   -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pcie.0,addr=0x1f' \
   -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
   -device 'usb-ehci,id=ehci,bus=pcie.0,addr=0x1' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
   -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
   -device 'usb-kbd,id=keyboard,bus=ehci.0,port=2' \
   -device 'virtio-gpu,id=vga,bus=pcie.0,addr=0x2' \

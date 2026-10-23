@@ -285,7 +285,8 @@ my $confdesc = {
         description => "Selectively enable hotplug features. This is a comma separated list of"
             . " hotplug features: 'network', 'disk', 'cpu', 'memory', 'usb' and 'cloudinit'. Use '0' to disable"
             . " hotplug completely. Using '1' as value is an alias for the default `network,disk,usb`."
-            . " USB hotplugging is possible for guests with machine version >= 7.1 and ostype l26 or"
+            . " The 'usb' feature includes virtual USB storage. USB passthrough hotplugging is possible"
+            . " for guests with machine version >= 7.1 and ostype l26 or"
             . " windows > 7.",
         default => 'network,disk,usb',
     },
@@ -431,7 +432,7 @@ EODESC
         format => 'pve-qm-bootdisk',
         description =>
             "Enable booting from specified disk. Deprecated: Use 'boot: order=foo;bar' instead.",
-        pattern => '(ide|sata|scsi|virtio|nvme|sdcard)\d+',
+        pattern => '(ide|sata|scsi|virtio|nvme|usbdisk|sdcard)\d+',
     },
     smp => {
         optional => 1,
@@ -666,6 +667,13 @@ EODESCR
         description =>
             'List of VirtIO network devices and their effective host_mtu setting. A value of 0'
             . ' means that the host_mtu parameter is to be avoided for the corresponding device.'
+            . ' This is used internally for snapshots.',
+    },
+    'running-usbdisk-controller' => {
+        type => 'boolean',
+        optional => 1,
+        description =>
+            'Whether the running VM has a USB storage controller without configured disks.'
             . ' This is used internally for snapshots.',
     },
     machine => get_standard_option('pve-qemu-machine'),
@@ -1823,6 +1831,7 @@ sub json_config_properties {
             snaptime => 1,
             vmstate => 1,
             'running-nets-host-mtu' => 1,
+            'running-usbdisk-controller' => 1,
             runningmachine => 1,
             runningcpu => 1,
             meta => 1,
@@ -2146,7 +2155,7 @@ sub parse_vm_config {
             } else {
                 $key = 'ide2' if $key eq 'cdrom';
                 my $fmt = $section->{schema}->{$key}->{format};
-                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata|nvme|emmc|sdcard)$/) {
+                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata|nvme|usbdisk|emmc|sdcard)$/) {
                     my $v = parse_drive($key, $value);
                     if (my $volid = filename_to_volume_id($vmid, $v->{file}, $v->{media})) {
                         $v->{file} = $volid;
@@ -3229,6 +3238,7 @@ sub config_to_command {
 
     my ($forcemachine, $forcecpu, $live_restore_backing, $dry_run) =
         $options->@{qw(force-machine force-cpu live-restore-backing dry-run)};
+    my $force_usbdisk_controller = $options->{'force-usbdisk-controller'};
 
     my $is_template = PVE::QemuConfig->is_template($conf);
 
@@ -3321,6 +3331,9 @@ sub config_to_command {
     my $q35 = PVE::QemuServer::Machine::machine_type_is_q35($conf);
     my $hotplug_features =
         parse_hotplug_features(defined($conf->{hotplug}) ? $conf->{hotplug} : '1');
+    my $usbdisk_controller = PVE::QemuServer::USB::needs_usbdisk_controller(
+        $conf, $force_usbdisk_controller,
+    );
     my $use_old_bios_files = undef;
     ($use_old_bios_files, $machine_type) = qemu_use_old_bios_files($machine_type);
 
@@ -3424,8 +3437,15 @@ sub config_to_command {
             values PVE::QemuServer::NVMe::topology($conf)->%*;
     }
     if (
-        my $bridges =
-        get_pci_bridges($conf, $arch, $q35, $max_scsihw, $version_guard, $multifunction)
+        my $bridges = get_pci_bridges(
+            $conf,
+            $arch,
+            $q35,
+            $max_scsihw,
+            $version_guard,
+            $multifunction,
+            $usbdisk_controller,
+        )
     ) {
         push @$devices, $bridges->@*;
     }
@@ -3435,7 +3455,9 @@ sub config_to_command {
     }
 
     # add usb controllers
-    my @usbcontrollers = PVE::QemuServer::USB::get_usb_controllers($conf, $arch, $machine_version);
+    my @usbcontrollers = PVE::QemuServer::USB::get_usb_controllers(
+        $conf, $arch, $machine_version, $force_usbdisk_controller,
+    );
     push @$devices, @usbcontrollers if @usbcontrollers;
 
     my ($vga, $qxlnum) = get_vga_properties($conf, $arch, $machine_version, $winversion);
@@ -4041,8 +4063,25 @@ sub vm_devices_list {
     # property will not be set.
     my $resblock = mon_cmd($vmid, 'query-block');
     for my $block ($resblock->@*) {
-        my $qdev_id = $block->{qdev} or next;
-        my $drive_id = PVE::QemuServer::Blockdev::qdev_id_to_drive_id($qdev_id);
+        # USB removal unparents the embedded SCSI device before its pending
+        # requests finish. Its QOM path then disappears, although the block
+        # backend is still in use. Wait for that frontend too.
+        my $drive_id;
+        $drive_id = $1 if ($block->{inserted}->{'node-name'} // '') =~ /^drive-(usbdisk\d+)$/;
+        if (
+            !defined($drive_id)
+            && ($block->{device} // '') =~ /^drive-(usbdisk\d+)$/
+            && (!($block->{removable} // 1) || exists($block->{tray_open}))
+        ) {
+            # Legacy -drive nodes have generated node names. A fixed medium
+            # or tray information proves that a SCSI frontend is still attached;
+            # an unattached orphan backend has neither and must not block retry.
+            $drive_id = $1;
+        }
+        if (!defined($drive_id)) {
+            my $qdev_id = $block->{qdev} or next;
+            $drive_id = PVE::QemuServer::Blockdev::qdev_id_to_drive_id($qdev_id);
+        }
         $devices->{$drive_id} = 1;
     }
 
@@ -4059,7 +4098,7 @@ sub vm_devices_list {
     # qom-list path=/machine/peripheral
     my $resperipheral = mon_cmd($vmid, 'qom-list', path => '/machine/peripheral');
     foreach my $per (@$resperipheral) {
-        if ($per->{name} =~ m/^usb(?:redirdev)?\d+$/) {
+        if ($per->{name} =~ m/^usb(?:disk|redirdev)?\d+$/) {
             $devices->{ $per->{name} } = 1;
         }
     }
@@ -4071,7 +4110,18 @@ sub vm_deviceplug {
     my ($storecfg, $conf, $vmid, $deviceid, $device, $arch, $machine_type) = @_;
 
     my $devices_list = vm_devices_list($vmid);
-    return 1 if defined($devices_list->{$deviceid});
+    if ($deviceid =~ /^usbdisk\d+$/ && !defined($conf->{$deviceid})) {
+        # A failed hotplug may have left a frontend or backend behind when
+        # cleanup also failed. Recreate it from the current request rather
+        # than adopting a possibly different pending disk or set of options.
+        if (defined($devices_list->{$deviceid})) {
+            qemu_devicedel($vmid, $deviceid);
+            qemu_devicedelverify($vmid, $deviceid);
+        }
+        qemu_drivedel($vmid, $deviceid);
+    } elsif (defined($devices_list->{$deviceid})) {
+        return 1;
+    }
 
     # we can't hotplug bridges, so check if the necessary one exists
     assert_pci_bridge_present($vmid, $deviceid);
@@ -4122,16 +4172,38 @@ sub vm_deviceplug {
 
         qemu_deviceadd($vmid, $devicefull);
         qemu_deviceaddverify($vmid, $deviceid);
-    } elsif ($deviceid =~ m/^(scsi)(\d+)$/) {
-        qemu_findorcreatescsihw($storecfg, $conf, $vmid, $device, $arch, $machine_type);
+    } elsif ($deviceid =~ m/^(scsi|usbdisk)(\d+)$/) {
+        qemu_findorcreatescsihw($storecfg, $conf, $vmid, $device, $arch, $machine_type)
+            if $device->{interface} eq 'scsi';
         qemu_driveadd($storecfg, $vmid, $device);
 
         my $devicefull =
             print_drivedevice_full($storecfg, $conf, $vmid, $device, $arch, $machine_type);
-        eval { qemu_deviceadd($vmid, $devicefull); };
+        my $added;
+        eval {
+            qemu_deviceadd($vmid, $devicefull);
+            $added = 1;
+            qemu_deviceaddverify($vmid, $deviceid) if $device->{interface} eq 'usbdisk';
+        };
         if (my $err = $@) {
-            eval { qemu_drivedel($vmid, $deviceid); };
-            warn $@ if $@;
+            my $cleanup_backend = 1;
+            if ($added && $device->{interface} eq 'usbdisk') {
+                eval {
+                    qemu_devicedel($vmid, $deviceid);
+                    qemu_devicedelverify($vmid, $deviceid);
+                };
+                if (my $cleanup_error = $@) {
+                    warn $cleanup_error;
+                    # Legacy drive_del can detach media from a still-live
+                    # USB frontend. Keep its backend intact until a retry
+                    # has confirmed that the frontend is gone.
+                    $cleanup_backend = 0;
+                }
+            }
+            if ($cleanup_backend) {
+                eval { qemu_drivedel($vmid, $deviceid); };
+                warn $@ if $@;
+            }
             die $err;
         }
     } elsif ($deviceid =~ m/^(net)(\d+)$/) {
@@ -4167,7 +4239,13 @@ sub vm_deviceunplug {
     my ($vmid, $conf, $deviceid) = @_;
 
     my $devices_list = vm_devices_list($vmid);
-    return 1 if !defined($devices_list->{$deviceid});
+    if (!defined($devices_list->{$deviceid})) {
+        # A previous attempt may have removed the USB frontend before its
+        # block backend failed to detach. Complete that cleanup on retry.
+        qemu_drivedel($vmid, $deviceid)
+            if $deviceid =~ m/^usbdisk\d+$/ && defined($conf->{$deviceid});
+        return 1;
+    }
 
     my $bootdisks = PVE::QemuServer::Drive::get_bootdisks($conf);
     die "can't unplug bootdisk '$deviceid'\n" if grep { $_ eq $deviceid } @$bootdisks;
@@ -4194,16 +4272,18 @@ sub vm_deviceunplug {
     } elsif ($deviceid =~ m/^(virtioscsi|scsihw)(\d+)$/) {
         qemu_devicedel($vmid, $deviceid);
         qemu_devicedelverify($vmid, $deviceid, 15);
-    } elsif ($deviceid =~ m/^(scsi)(\d+)$/) {
+    } elsif ($deviceid =~ m/^(scsi|usbdisk)(\d+)$/) {
         my $device = parse_drive($deviceid, $conf->{$deviceid});
 
         qemu_devicedel($vmid, $deviceid);
         qemu_devicedelverify($vmid, $deviceid);
         qemu_drivedel($vmid, $deviceid);
-        qemu_deletescsihw($conf, $vmid, $deviceid);
+        qemu_deletescsihw($conf, $vmid, $deviceid) if $device->{interface} eq 'scsi';
 
         qemu_iothread_del($vmid, "virtioscsi$device->{index}", $device)
-            if $conf->{scsihw} && ($conf->{scsihw} eq 'virtio-scsi-single');
+            if $device->{interface} eq 'scsi'
+            && $conf->{scsihw}
+            && ($conf->{scsihw} eq 'virtio-scsi-single');
     } elsif ($deviceid =~ m/^(net)(\d+)$/) {
         qemu_devicedel($vmid, $deviceid);
         qemu_devicedelverify($vmid, $deviceid);
@@ -4866,6 +4946,25 @@ sub vmconfig_hotplug_pending {
         }
     }
 
+    # Apply mutable hotplug settings before evaluating any device changes in
+    # this request. CPU and memory settings still require a fresh VM start.
+    my $pending_delete_hash = PVE::QemuConfig->parse_pending_delete($conf->{pending}->{delete});
+    if ((!$selection || $selection->{hotplug}) && ($conf->{hotplug} // '1') !~ /(cpu|memory)/) {
+        if ($pending_delete_hash->{hotplug}) {
+            my $old = delete $conf->{hotplug};
+            $cloudinit_record_changed->($conf, 'hotplug', $old, undef);
+            PVE::QemuConfig->remove_from_pending_delete($conf, 'hotplug');
+            delete $pending_delete_hash->{hotplug};
+            $changes = 1;
+        }
+        my $new = $conf->{pending}->{hotplug};
+        if (defined($new) && $new !~ /(cpu|memory)/) {
+            $cloudinit_record_changed->($conf, 'hotplug', $conf->{hotplug}, $new);
+            $conf->{hotplug} = delete $conf->{pending}->{hotplug};
+            $changes = 1;
+        }
+    }
+
     if ($changes) {
         PVE::QemuConfig->write_config($vmid, $conf);
     }
@@ -4888,14 +4987,13 @@ sub vmconfig_hotplug_pending {
     };
 
     my $cgroup = PVE::QemuServer::CGroup->new($vmid);
-    my $pending_delete_hash = PVE::QemuConfig->parse_pending_delete($conf->{pending}->{delete});
 
     foreach my $opt (sort keys %$pending_delete_hash) {
         next if $selection && !$selection->{$opt};
         my $force = $pending_delete_hash->{$opt}->{force};
         eval {
             if ($opt eq 'hotplug') {
-                die "skip\n" if ($conf->{hotplug} =~ /(cpu|memory)/);
+                die "skip\n"; # mutable settings were handled above
             } elsif ($opt eq 'tablet') {
                 die "skip\n" if !$hotplug_features->{usb};
                 if ($defaults->{tablet}) {
@@ -4934,7 +5032,11 @@ sub vmconfig_hotplug_pending {
                 );
             } elsif (is_valid_drivename($opt)) {
                 die "skip\n"
-                    if !$hotplug_features->{disk}
+                    if !(
+                        $opt =~ /^usbdisk\d+$/
+                        ? $hotplug_features->{usb}
+                        : $hotplug_features->{disk}
+                    )
                     || $opt =~ m/(efidisk|ide|sata|nvme|emmc|sdcard|tpmstate)(\d+)/;
                 vm_deviceunplug($vmid, $conf, $opt);
                 vmconfig_delete_or_detach_drive($vmid, $storecfg, $conf, $opt, $force);
@@ -4964,10 +5066,7 @@ sub vmconfig_hotplug_pending {
         my $value = $conf->{pending}->{$opt};
         eval {
             if ($opt eq 'hotplug') {
-                die "skip\n"
-                    if ($value =~ /memory/) || ($conf->{hotplug} && $conf->{hotplug} =~ /memory/);
-                die "skip\n"
-                    if ($value =~ /cpu/) || ($conf->{hotplug} && $conf->{hotplug} =~ /cpu/);
+                die "skip\n"; # mutable settings were handled above
             } elsif ($opt eq 'tablet') {
                 die "skip\n" if !$hotplug_features->{usb};
                 if ($value == 1) {
@@ -5027,7 +5126,9 @@ sub vmconfig_hotplug_pending {
                 vmconfig_update_disk(
                     $storecfg,
                     $conf,
-                    $hotplug_features->{disk},
+                    $opt =~ /^usbdisk\d+$/
+                    ? $hotplug_features->{usb}
+                    : $hotplug_features->{disk},
                     $vmid,
                     $opt,
                     $value,
@@ -5388,6 +5489,45 @@ sub vmconfig_update_agent {
     return; # either no actual change (e.g., format string reordered) or just hotpluggable changes
 }
 
+my sub vmconfig_replace_usbdisk {
+    my ($storecfg, $conf, $vmid, $opt, $drive, $old_drive, $arch, $machine_type) = @_;
+
+    # Prepare metadata and activate the new volume before disconnecting the
+    # current disk. Publish the unused entry only after replacement succeeds.
+    my $updated_conf = {%$conf};
+    vmconfig_register_unused_drive($storecfg, $vmid, $updated_conf, $old_drive);
+    PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $drive->{file} !~ m|^/dev/.+|;
+
+    my $unplugged;
+    eval {
+        vm_deviceunplug($vmid, $conf, $opt);
+        $unplugged = 1;
+        vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive, $arch, $machine_type);
+    };
+    if (my $err = $@) {
+        eval {
+            my $restore = $unplugged;
+            if (!$restore) {
+                # Leave an intact original frontend alone. query-block may
+                # still list its embedded SCSI device after it is unparented.
+                my $devices = mon_cmd($vmid, 'qom-list', path => '/machine/peripheral');
+                $restore = !grep { $_->{name} eq $opt } $devices->@*;
+            }
+            if ($restore) {
+                # Partial removal or realization can leave a backend behind.
+                # Release it before restoring the original disk and options.
+                vm_deviceunplug($vmid, $conf, $opt);
+                vm_deviceplug($storecfg, $conf, $vmid, $opt, $old_drive, $arch, $machine_type);
+            }
+        };
+        warn "unable to restore USB disk '$opt' after failed replacement - $@" if $@;
+        die $err;
+    }
+
+    %$conf = %$updated_conf;
+    return 1;
+}
+
 sub vmconfig_update_disk {
     my ($storecfg, $conf, $hotplug, $vmid, $opt, $value, $arch, $machine_type) = @_;
 
@@ -5404,6 +5544,10 @@ sub vmconfig_update_disk {
 
                 die "skip\n" if !$hotplug || $drive->{interface} =~ m/^(nvme|emmc|sdcard)$/;
 
+                return vmconfig_replace_usbdisk(
+                    $storecfg, $conf, $vmid, $opt, $drive, $old_drive, $arch, $machine_type,
+                ) if $drive->{interface} eq 'usbdisk';
+
                 # unplug and register as unused
                 vm_deviceunplug($vmid, $conf, $opt);
                 vmconfig_register_unused_drive($storecfg, $vmid, $conf, $old_drive);
@@ -5414,22 +5558,40 @@ sub vmconfig_update_disk {
                 # skip non hotpluggable value
                 if (
                     safe_string_ne($drive->{aio}, $old_drive->{aio})
-                    || safe_string_ne($drive->{discard}, $old_drive->{discard})
+                    || safe_string_ne(
+                        $drive->{discard} // 'ignore',
+                        $old_drive->{discard} // 'ignore',
+                    )
                     || safe_string_ne($drive->{iothread}, $old_drive->{iothread})
                     || safe_string_ne($drive->{queues}, $old_drive->{queues})
                     || safe_string_ne($drive->{product}, $old_drive->{product})
                     || safe_string_ne($drive->{cache}, $old_drive->{cache})
                     || safe_string_ne($drive->{ssd}, $old_drive->{ssd})
                     || safe_string_ne($drive->{vendor}, $old_drive->{vendor})
-                    || safe_string_ne($drive->{ro}, $old_drive->{ro})
+                    || safe_boolean_ne($drive->{ro}, $old_drive->{ro})
                     || (
                         $drive->{interface} eq 'nvme' && grep {
                             safe_string_ne($drive->{$_}, $old_drive->{$_})
                         } PVE::QemuServer::NVMe::option_names()
                     )
-                    || ($drive->{interface} eq 'emmc'
-                        && PVE::QemuServer::EMMC::needs_cold_restart($old_drive, $drive)
+                    || (
+                        $drive->{interface} eq 'usbdisk'
+                        && (
+                            safe_boolean_ne(
+                                $drive->{removable} // 1,
+                                $old_drive->{removable} // 1,
+                            )
+                            || safe_boolean_ne(
+                                $drive->{detect_zeroes} // 1,
+                                $old_drive->{detect_zeroes} // 1,
+                            )
+                            || grep {
+                                safe_string_ne($drive->{$_}, $old_drive->{$_})
+                            } qw(serial rerror werror snapshot format)
+                        )
                     )
+                    || ($drive->{interface} eq 'emmc'
+                        && PVE::QemuServer::EMMC::needs_cold_restart($old_drive, $drive))
                     || (
                         $drive->{interface} eq 'sdcard' && grep {
                             safe_string_ne($drive->{$_}, $old_drive->{$_})
@@ -5506,6 +5668,16 @@ sub vmconfig_update_disk {
     }
 
     die "skip\n" if !$hotplug || $opt =~ m/(ide|sata|nvme|emmc|sdcard)(\d+)/;
+    if ($drive->{interface} eq 'usbdisk') {
+        # New VMs reserve this controller at startup. Older running VMs can
+        # acquire it live if their PCI bridge is already present.
+        my $devices = vm_devices_list($vmid);
+        if (!$devices->{'usbdisk-xhci'}) {
+            die "skip\n" if !$devices->{'pci.4'};
+            qemu_deviceadd($vmid, PVE::QemuServer::USB::print_usbdisk_controller($arch));
+            qemu_deviceaddverify($vmid, 'usbdisk-xhci');
+        }
+    }
     # hotplug new disks
     PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $drive->{file} !~ m|^/dev/.+|;
     vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive, $arch, $machine_type);
@@ -5612,7 +5784,7 @@ my sub remove_left_over_vmstate_opts {
     my ($vmid, $conf) = @_;
 
     my $found;
-    for my $opt (qw(running-nets-host-mtu runningmachine runningcpu)) {
+    for my $opt (qw(running-nets-host-mtu running-usbdisk-controller runningmachine runningcpu)) {
         if (defined($conf->{$opt})) {
             print "No VM state set, removing left-over option '$opt'\n";
             delete $conf->{$opt};
@@ -5738,6 +5910,7 @@ sub vm_start {
 #   }
 #   nets-host-mtu => Used for migration compat. List of VirtIO network devices and their effective
 #       host_mtu setting according to the QEMU object model on the source side of the migration.
+#   usbdisk-controller => Recreate the empty USB storage controller present in saved VM state.
 # migrate_opts:
 #   nbd => volumes for NBD exports (vm_migrate_alloc_nbd_disks)
 #   migratedfrom => source node
@@ -5807,11 +5980,13 @@ sub vm_start_nolock {
     my $forcemachine = $params->{forcemachine};
     my $forcecpu = $params->{forcecpu};
     my $nets_host_mtu = $params->{'nets-host-mtu'};
+    my $usbdisk_controller = $params->{'usbdisk-controller'};
     if ($resume) {
         # enforce machine and CPU type on suspended vm to ensure HW compatibility
         $forcemachine = $conf->{runningmachine};
         $forcecpu = $conf->{runningcpu};
         $nets_host_mtu = $conf->{'running-nets-host-mtu'};
+        $usbdisk_controller = $conf->{'running-usbdisk-controller'} // 0;
         print "Resuming suspended VM\n";
     }
 
@@ -5865,6 +6040,7 @@ sub vm_start_nolock {
                 'force-cpu' => $forcecpu,
                 'live-restore-backing' => $params->{'live-restore-backing'},
                 'nets-host-mtu' => $nets_host_mtu,
+                'force-usbdisk-controller' => $usbdisk_controller,
             },
         );
 
@@ -6196,7 +6372,9 @@ sub vm_start_nolock {
             PVE::Storage::deactivate_volumes($storecfg, [$vmstate]);
             PVE::Storage::vdisk_free($storecfg, $vmstate);
         }
-        delete $conf->@{qw(lock vmstate running-nets-host-mtu runningmachine runningcpu)};
+        delete $conf->@{
+            qw(lock vmstate running-nets-host-mtu running-usbdisk-controller runningmachine runningcpu)
+        };
         PVE::QemuConfig->write_config($vmid, $conf);
     } elsif (!$conf->{vmstate} && !$migratedfrom) {
         remove_left_over_vmstate_opts($vmid, $conf);
@@ -6230,6 +6408,8 @@ sub vm_commandline {
         $options->{'force-machine'} = $snapshot->{runningmachine};
         $options->{'force-cpu'} = $snapshot->{runningcpu};
         $options->{'nets-host-mtu'} = $snapshot->{'running-nets-host-mtu'};
+        $options->{'force-usbdisk-controller'} = $snapshot->{'running-usbdisk-controller'}
+            // ($snapshot->{vmstate} ? 0 : undef);
 
         $snapshot->{digest} = $conf->{digest}; # keep file digest for API
 
@@ -6930,7 +7110,7 @@ sub restore_update_config_line {
         $netstr = PVE::QemuServer::Network::print_net($net);
         $res .= "$id: $netstr\n";
     } elsif ($line =~
-        m/^((ide|scsi|virtio|sata|nvme|emmc|sdcard|efidisk|tpmstate)\d+):\s*(\S+)\s*$/
+        m/^((ide|scsi|virtio|sata|nvme|usbdisk|emmc|sdcard|efidisk|tpmstate)\d+):\s*(\S+)\s*$/
     ) {
         my $virtdev = $1;
         my $value = $3;

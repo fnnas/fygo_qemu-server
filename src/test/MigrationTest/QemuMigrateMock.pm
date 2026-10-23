@@ -244,6 +244,15 @@ $qemu_server_machine_module->mock(
 );
 
 my $qemu_server_network_module = Test::MockModule->new("PVE::QemuServer::Network");
+my $qemu_server_usb_module = Test::MockModule->new('PVE::QemuServer::USB');
+$qemu_server_usb_module->mock(
+    mon_cmd => sub {
+        my (undef, $command, %params) = @_;
+        die "unexpected USB topology query\n"
+            if $command ne 'qom-list' || $params{path} ne '/machine/peripheral';
+        return $vm_status->{'usbdisk-controller'} ? [{ name => 'usbdisk-xhci' }] : [];
+    },
+);
 $qemu_server_network_module->mock(
     del_nets_bridge_fdb => sub { return; },
     mon_cmd => sub {

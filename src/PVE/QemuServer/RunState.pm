@@ -110,7 +110,8 @@ sub vm_suspend($vmid, $skiplock = undef, $includestate = undef, $statestorage = 
                         PVE::Storage::deactivate_volumes($storecfg, [$vmstate]);
                         PVE::Storage::vdisk_free($storecfg, $vmstate);
                         delete $conf->@{
-                            qw(vmstate runningmachine runningcpu running-nets-host-mtu)};
+                            qw(vmstate runningmachine runningcpu running-nets-host-mtu running-usbdisk-controller)
+                        };
                         PVE::QemuConfig->write_config($vmid, $conf);
                     };
                     warn $@ if $@;

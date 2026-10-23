@@ -21,6 +21,8 @@
   -global 'ICH9-LPC.disable_s3=1' \
   -global 'ICH9-LPC.disable_s4=1' \
   -readconfig /usr/share/qemu-server/pve-q35-4.0.cfg \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
   -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
   -device 'vfio-pci-nohotplug,sysfsdev=/sys/bus/mdev/devices/00000000-0000-0000-0000-000000008006,id=hostpci0,bus=ich9-pcie-port-1,addr=0x0,display=on,ramfb=on,x-igd-opregion=on' \
   -device 'vfio-pci,host=0000:07:10.0,id=hostpci1,bus=ich9-pcie-port-2,addr=0x0' \

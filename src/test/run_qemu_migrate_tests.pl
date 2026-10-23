@@ -537,6 +537,7 @@ my $tests = [
         vm_status => {
             running => 1,
             runningmachine => 'pc-q35-5.0+pve0',
+            'usbdisk-controller' => 1,
         },
         opts => {
             online => 1,
@@ -563,6 +564,7 @@ my $tests = [
             vm_status => {
                 running => 1,
                 runningmachine => 'pc-q35-5.0+pve0',
+                'usbdisk-controller' => 1,
             },
         },
     },

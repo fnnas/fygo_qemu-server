@@ -40,6 +40,7 @@ use PVE::QemuServer::Monitor qw(mon_cmd vm_qmp_peer);
 use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::Network;
 use PVE::QemuServer::NVMe;
+use PVE::QemuServer::USB;
 use PVE::QemuServer::QMPHelpers;
 use PVE::QemuServer::DBusVMState;
 use PVE::QemuServer;
@@ -1094,6 +1095,9 @@ sub phase2_start_local_cluster {
     if ($start->{'nets-host-mtu'}) {
         push @$cmd, '--nets-host-mtu', $start->{'nets-host-mtu'};
     }
+    if (defined($start->{'usbdisk-controller'})) {
+        push @$cmd, '--usbdisk-controller', $start->{'usbdisk-controller'};
+    }
 
     if ($self->{storage_migration}) {
         push @$cmd, '--targetstorage', ($self->{opts}->{targetstorage} // '1');
@@ -1324,6 +1328,10 @@ sub phase2 {
 
     if (my $nets_host_mtu = PVE::QemuServer::Network::get_nets_host_mtu($vmid, $conf)) {
         $params->{start_params}->{'nets-host-mtu'} = $nets_host_mtu;
+    }
+    my $usbdisk_controller = PVE::QemuServer::USB::get_usbdisk_controller_override($vmid, $conf);
+    if (defined($usbdisk_controller)) {
+        $params->{start_params}->{'usbdisk-controller'} = $usbdisk_controller;
     }
 
     my ($tunnel_info, $spice_port);

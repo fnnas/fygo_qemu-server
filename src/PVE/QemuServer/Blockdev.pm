@@ -72,6 +72,8 @@ sub qdev_id_to_drive_id {
 
     if ($qdev_id =~ m{^/machine/peripheral/((?:virtio|emmc|sdcard|nvme)\d+)/virtio-backend$}) {
         return $1;
+    } elsif ($qdev_id =~ m|^/machine/peripheral/(usbdisk\d+)/\1\.0/legacy\[0\]$|) {
+        return $1;
     } elsif ($qdev_id =~ m{^/machine/(?:system|virt)\.flash0$}) {
         return 'pflash0';
     } elsif ($qdev_id =~ m{^/machine/(?:system|virt)\.flash1$}) {
@@ -740,12 +742,22 @@ sub resize {
     die "cannot resize SD card '$drive_id' while the VM is running - shut down the VM first\n"
         if $running && $drive_id =~ m/^sdcard\d+$/;
 
+    my $inserted;
+    if ($running && $drive_id =~ /^usbdisk\d+$/) {
+        # A removable USB disk may have been ejected by the guest. Check
+        # that QEMU can resize it before changing the backing volume.
+        $inserted = get_block_info($vmid)->{$drive_id}->{inserted}
+            or die "no block node inserted for drive '$drive_id'\n";
+        die "cannot resize read-only USB disk '$drive_id' while the VM is running"
+            . " - shut down the VM first\n"
+            if $inserted->{ro};
+    }
+
     PVE::Storage::volume_resize($storecfg, $volid, $size, $running);
 
     return if !$running;
 
-    my $block_info = get_block_info($vmid);
-    my $inserted = $block_info->{$drive_id}->{inserted}
+    $inserted //= get_block_info($vmid)->{$drive_id}->{inserted}
         or die "no block node inserted for drive '$drive_id'\n";
 
     my $padding = (1024 - $size % 1024) % 1024;

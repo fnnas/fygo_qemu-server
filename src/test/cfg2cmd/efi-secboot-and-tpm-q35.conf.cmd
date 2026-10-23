@@ -22,6 +22,7 @@
   -global 'ICH9-LPC.disable_s4=1' \
   -readconfig /usr/share/qemu-server/pve-q35-4.0.cfg \
   -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
   -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
   -chardev 'socket,id=tpmchar,path=/var/run/qemu-server/8006.swtpm' \
   -tpmdev 'emulator,id=tpmdev,chardev=tpmchar' \

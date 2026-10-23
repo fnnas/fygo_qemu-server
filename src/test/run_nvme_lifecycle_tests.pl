@@ -393,7 +393,7 @@ for my $disk ('nvme0', 'nvme1') {
         (
             map {
                 [$_, '', 'emmc0', 100 * 1024**2, qr/eMMC user area must be a power of two/]
-            } qw(unused0 nvme0 virtio0)
+            } qw(unused0 nvme0 usbdisk0 virtio0)
         ),
         [
             'emmc0',
@@ -539,7 +539,7 @@ my $reject_reassign = sub {
     is_deeply(\%configs, $expected, 'slot conflicts preserve both VM configurations');
 };
 
-for my $bus (qw(nvme emmc virtio scsi sata ide)) {
+for my $bus (qw(nvme usbdisk emmc virtio scsi sata ide)) {
     my $disk = "${bus}0";
     for my $pending ('same-volume', 'replacement', 'delete', 'force-delete') {
         $reset->();
@@ -648,7 +648,7 @@ for my $pending_boot (
         });
     };
 
-    for my $bus (qw(nvme emmc virtio scsi sata ide)) {
+    for my $bus (qw(nvme usbdisk emmc virtio scsi sata ide)) {
         my $disk = "${bus}0";
         for my $pending ('same-volume', 'replacement', 'delete', 'force-delete') {
             $reset->();
@@ -743,7 +743,7 @@ for my $pending_boot (
             map {
                 my $disk = "${_}1";
                 map { [$disk, $_, $volume] } qw(current pending snapshot)
-            } qw(nvme emmc virtio)
+            } qw(nvme emmc usbdisk virtio)
         ),
         ['nvme1', 'pending', '/var/lib/vz/images/8006/vm-8006-disk-0.raw'],
         ['nvme1', 'pending', 'alias:8006/vm-8006-disk-0.raw'],
@@ -789,7 +789,7 @@ for my $pending_boot (
     $configs{8007} = {
         nvme1 => 'local:8007/vm-8007-disk-1.raw',
         pending => { emmc1 => 'local:8007/vm-8007-disk-2.raw' },
-        snapshots => { saved => { virtio1 => 'local:8007/vm-8007-disk-3.raw' } },
+        snapshots => { saved => { usbdisk1 => 'local:8007/vm-8007-disk-3.raw' } },
     };
     my $target_before = dclone($configs{8007});
     eval { $move->('nvme0', 'unused0'); };
@@ -805,7 +805,7 @@ for my $pending_boot (
         'successful reassignment retains unrelated target configuration and snapshots',
     );
 
-    for my $bus (qw(nvme emmc virtio scsi sata ide)) {
+    for my $bus (qw(nvme usbdisk emmc virtio scsi sata ide)) {
         my $reference_disk = "${bus}1";
         for my $reference (
             $volume,
@@ -902,7 +902,7 @@ for my $pending_boot (
             snapshots => {},
         },
         { nvme0 => $volume, snapshots => { snap1 => { nvme0 => $volume } } },
-        { nvme0 => $volume, virtio0 => $volume, pending => {}, snapshots => {} },
+        { nvme0 => $volume, usbdisk0 => $volume, pending => {}, snapshots => {} },
     ) {
         ok(
             PVE::QemuServer::Drive::is_volume_in_use({}, $conf, 'nvme0', $volume),
@@ -913,7 +913,7 @@ for my $pending_boot (
     $reset->();
     $configs{8006} = {
         nvme0 => $volume,
-        pending => { virtio0 => 'local:8006/vm-8006-disk-3.raw' },
+        pending => { usbdisk0 => 'local:8006/vm-8006-disk-3.raw' },
         snapshots => {},
     };
     eval { $move->('nvme0', 'unused0'); };
@@ -939,7 +939,7 @@ for my $pending_boot (
         $configs{8006} = { nvme0 => $volume, pending => {}, snapshots => {} };
         my $before;
         my $stage = sub {
-            $configs{8006}->{pending}->{virtio1} = $volume;
+            $configs{8006}->{pending}->{usbdisk1} = $volume;
             $before = dclone(\%configs);
         };
         if ($concurrent) {
@@ -975,7 +975,7 @@ for my $pending_boot (
             );
             is($configs{8006}->{unused0}, $volume, 'copy-only migration retains its source volume');
             is(
-                $configs{8006}->{pending}->{virtio1},
+                $configs{8006}->{pending}->{usbdisk1},
                 $volume,
                 'copy-only migration keeps the pending reference valid',
             );

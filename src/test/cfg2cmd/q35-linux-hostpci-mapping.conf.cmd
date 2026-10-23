@@ -28,6 +28,7 @@
   -readconfig /usr/share/qemu-server/pve-q35-4.0.cfg \
   -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
   -device 'vmgenid,guid=54d1c06c-8f5b-440f-b5b2-6eab1380e13d' \
+  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
   -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
   -device 'vfio-pci,host=0000:07:10.0,id=hostpci0,bus=pci.0,addr=0x10' \
   -device 'vfio-pci,sysfsdev=/sys/bus/mdev/devices/00000001-0000-0000-0000-000000008006,id=hostpci1,bus=pci.0,addr=0x11' \
