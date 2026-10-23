@@ -2,6 +2,7 @@ package PVE::QemuServer::USB;
 
 use strict;
 use warnings;
+use PVE::QemuServer::Drive;
 use PVE::QemuServer::PCI qw(print_pci_addr);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Helpers qw(min_version windows_version);
@@ -162,6 +163,13 @@ sub get_usb_controllers {
         push @$devices, '-device', print_qemu_xhci_controller($pciaddr);
     } elsif ($use_usb3) {
         push @$devices, '-device', "nec-usb-xhci,id=xhci$pciaddr";
+    }
+
+    if (grep { /^usbdisk\d+$/ } keys $conf->%*) {
+        # Keep storage ports separate from host USB, SPICE redirection and input devices.
+        my $ports = $PVE::QemuServer::Drive::MAX_USB_DISKS;
+        $pciaddr = print_pci_addr('usbdisk-xhci', $arch);
+        push @$devices, '-device', "qemu-xhci,id=usbdisk-xhci,p2=$ports,p3=$ports$pciaddr";
     }
 
     return @$devices;

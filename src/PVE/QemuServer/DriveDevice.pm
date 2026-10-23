@@ -192,9 +192,10 @@ sub print_drivedevice_full {
         for my $option (qw(max_ioqpairs msix_qsize mdts)) {
             $device .= ",$option=$drive->{$option}" if defined($drive->{$option});
         }
-    } elsif ($drive->{interface} eq 'usb') {
-        die "implement me";
-        #  -device ide-drive,bus=ide.1,unit=0,drive=drive-ide0-1-0,id=ide0-1-0
+    } elsif ($drive->{interface} eq 'usbdisk') {
+        my $port = $drive->{index} + 1;
+        $device = "usb-storage,id=$drive_id,drive=drive-$drive_id,bus=usbdisk-xhci.0,port=$port";
+        $device .= ',removable=' . (($drive->{removable} // 1) ? 'on' : 'off');
     } else {
         die "unsupported interface type";
     }
@@ -204,7 +205,7 @@ sub print_drivedevice_full {
     if (my $serial = $drive->{serial}) {
         $serial = _escape_qemu_arg_value(URI::Escape::uri_unescape($serial));
         $device .= ",serial=$serial";
-    } elsif ($drive->{interface} eq 'nvme') {
+    } elsif ($drive->{interface} eq 'nvme' || $drive->{interface} eq 'usbdisk') {
         $device .= ",serial=$drive_id";
     }
 

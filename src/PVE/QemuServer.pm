@@ -403,7 +403,7 @@ EODESC
         format => 'pve-qm-bootdisk',
         description =>
             "Enable booting from specified disk. Deprecated: Use 'boot: order=foo;bar' instead.",
-        pattern => '(ide|sata|scsi|virtio|nvme)\d+',
+        pattern => '(ide|sata|scsi|virtio|nvme|usbdisk)\d+',
     },
     smp => {
         optional => 1,
@@ -2054,7 +2054,7 @@ sub parse_vm_config {
             } else {
                 $key = 'ide2' if $key eq 'cdrom';
                 my $fmt = $section->{schema}->{$key}->{format};
-                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata|nvme)$/) {
+                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata|nvme|usbdisk)$/) {
                     my $v = parse_drive($key, $value);
                     if (my $volid = filename_to_volume_id($vmid, $v->{file}, $v->{media})) {
                         $v->{file} = $volid;
@@ -3864,7 +3864,7 @@ sub vm_devices_list {
     # qom-list path=/machine/peripheral
     my $resperipheral = mon_cmd($vmid, 'qom-list', path => '/machine/peripheral');
     foreach my $per (@$resperipheral) {
-        if ($per->{name} =~ m/^usb(?:redirdev)?\d+$/) {
+        if ($per->{name} =~ m/^usb(?:disk|redirdev)?\d+$/) {
             $devices->{ $per->{name} } = 1;
         }
     }
@@ -3926,8 +3926,9 @@ sub vm_deviceplug {
 
         qemu_deviceadd($vmid, $devicefull);
         qemu_deviceaddverify($vmid, $deviceid);
-    } elsif ($deviceid =~ m/^(scsi)(\d+)$/) {
-        qemu_findorcreatescsihw($storecfg, $conf, $vmid, $device, $arch, $machine_type);
+    } elsif ($deviceid =~ m/^(scsi|usbdisk)(\d+)$/) {
+        qemu_findorcreatescsihw($storecfg, $conf, $vmid, $device, $arch, $machine_type)
+            if $device->{interface} eq 'scsi';
         qemu_driveadd($storecfg, $vmid, $device);
 
         my $devicefull =
@@ -3994,16 +3995,18 @@ sub vm_deviceunplug {
     } elsif ($deviceid =~ m/^(virtioscsi|scsihw)(\d+)$/) {
         qemu_devicedel($vmid, $deviceid);
         qemu_devicedelverify($vmid, $deviceid, 15);
-    } elsif ($deviceid =~ m/^(scsi)(\d+)$/) {
+    } elsif ($deviceid =~ m/^(scsi|usbdisk)(\d+)$/) {
         my $device = parse_drive($deviceid, $conf->{$deviceid});
 
         qemu_devicedel($vmid, $deviceid);
         qemu_devicedelverify($vmid, $deviceid);
         qemu_drivedel($vmid, $deviceid);
-        qemu_deletescsihw($conf, $vmid, $deviceid);
+        qemu_deletescsihw($conf, $vmid, $deviceid) if $device->{interface} eq 'scsi';
 
         qemu_iothread_del($vmid, "virtioscsi$device->{index}", $device)
-            if $conf->{scsihw} && ($conf->{scsihw} eq 'virtio-scsi-single');
+            if $device->{interface} eq 'scsi'
+            && $conf->{scsihw}
+            && ($conf->{scsihw} eq 'virtio-scsi-single');
     } elsif ($deviceid =~ m/^(net)(\d+)$/) {
         qemu_devicedel($vmid, $deviceid);
         qemu_devicedelverify($vmid, $deviceid);
@@ -4730,7 +4733,8 @@ sub vmconfig_hotplug_pending {
                 );
             } elsif (is_valid_drivename($opt)) {
                 die "skip\n"
-                    if !$hotplug_features->{disk} || $opt =~ m/(efidisk|ide|sata|nvme|tpmstate)(\d+)/;
+                    if !$hotplug_features->{disk}
+                    || $opt =~ m/(efidisk|ide|sata|nvme|tpmstate)(\d+)/;
                 vm_deviceunplug($vmid, $conf, $opt);
                 vmconfig_delete_or_detach_drive($vmid, $storecfg, $conf, $opt, $force);
             } elsif ($opt =~ m/^memory$/) {
@@ -5217,9 +5221,16 @@ sub vmconfig_update_disk {
                     || safe_string_ne($drive->{ssd}, $old_drive->{ssd})
                     || safe_string_ne($drive->{vendor}, $old_drive->{vendor})
                     || safe_string_ne($drive->{ro}, $old_drive->{ro})
-                    || ($drive->{interface} eq 'nvme' && grep {
-                        safe_string_ne($drive->{$_}, $old_drive->{$_})
-                    } qw(serial max_ioqpairs msix_qsize mdts use-intel-id))
+                    || (
+                        $drive->{interface} eq 'nvme' && grep {
+                            safe_string_ne($drive->{$_}, $old_drive->{$_})
+                        } qw(serial max_ioqpairs msix_qsize mdts use-intel-id)
+                    )
+                    || (
+                        $drive->{interface} eq 'usbdisk' && grep {
+                            safe_string_ne($drive->{$_}, $old_drive->{$_})
+                        } qw(serial removable rerror werror)
+                    )
                 ) {
                     die "skip\n";
                 }
@@ -5291,6 +5302,11 @@ sub vmconfig_update_disk {
     }
 
     die "skip\n" if !$hotplug || $opt =~ m/(ide|sata|nvme)(\d+)/;
+    if ($drive->{interface} eq 'usbdisk') {
+        # The first USB disk needs a controller and PCI bridge created at VM start.
+        my $devices = vm_devices_list($vmid);
+        die "skip\n" if !$devices->{'usbdisk-xhci'};
+    }
     # hotplug new disks
     PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $drive->{file} !~ m|^/dev/.+|;
     vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive, $arch, $machine_type);
@@ -6692,7 +6708,7 @@ sub restore_update_config_line {
         $net->{macaddr} = PVE::Tools::random_ether_addr($dc->{mac_prefix}) if $net->{macaddr};
         $netstr = PVE::QemuServer::Network::print_net($net);
         $res .= "$id: $netstr\n";
-    } elsif ($line =~ m/^((ide|scsi|virtio|sata|nvme|efidisk|tpmstate)\d+):\s*(\S+)\s*$/) {
+    } elsif ($line =~ m/^((ide|scsi|virtio|sata|nvme|usbdisk|efidisk|tpmstate)\d+):\s*(\S+)\s*$/) {
         my $virtdev = $1;
         my $value = $3;
         my $di = parse_drive($virtdev, $value);

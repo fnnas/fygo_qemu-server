@@ -157,6 +157,7 @@ our $MAX_SCSI_DISKS = 31;
 my $MAX_VIRTIO_DISKS = 16;
 our $MAX_SATA_DISKS = 6;
 my $MAX_NVME_DISKS = 16;
+our $MAX_USB_DISKS = 8;
 our $MAX_UNUSED_DISKS = 256;
 our $NEW_DISK_RE = qr!^(([^/:\s]+):)?(\d+(\.\d+)?)$!;
 
@@ -514,7 +515,9 @@ my $scsidesc = {
 PVE::JSONSchema::register_standard_option("pve-qm-scsi", $scsidesc);
 
 my $nvme_fmt = {
-    %drivedesc_base, %readonly_fmt, %nvme_sub_fmt,
+    %drivedesc_base,
+    %readonly_fmt,
+    %nvme_sub_fmt,
     media => { %{ $drivedesc_base{media} }, enum => ['disk'] },
 };
 # NVMe controllers do not support configurable block error actions or IOThreads.
@@ -524,10 +527,34 @@ my $nvmedesc = {
     optional => 1,
     type => 'string',
     format => $nvme_fmt,
-    description => "Use volume as NVMe hard disk (n is 0 to "
-        . ($MAX_NVME_DISKS - 1) . ").",
+    description => "Use volume as NVMe hard disk (n is 0 to " . ($MAX_NVME_DISKS - 1) . ").",
 };
 PVE::JSONSchema::register_standard_option("pve-qm-nvme", $nvmedesc);
+
+my %usbdisk_sub_fmt = (
+    removable => {
+        type => 'boolean',
+        description => "Whether to expose the USB disk as removable media.",
+        default => 1,
+        optional => 1,
+    },
+);
+
+my $usbdisk_fmt = {
+    %drivedesc_base,
+    %readonly_fmt,
+    %usbdisk_sub_fmt,
+    media => { %{ $drivedesc_base{media} }, enum => ['disk'] },
+};
+my $usbdiskdesc = {
+    optional => 1,
+    type => 'string',
+    format => $usbdisk_fmt,
+    description => "Use volume as USB storage (n is 0 to "
+        . ($MAX_USB_DISKS - 1)
+        . "). Uses a dedicated USB 3 controller, independent of USB passthrough.",
+};
+PVE::JSONSchema::register_standard_option("pve-qm-usbdisk", $usbdiskdesc);
 
 my $sata_fmt = {
     %drivedesc_base, %ssd_fmt, %wwn_fmt,
@@ -657,6 +684,7 @@ my $alldrive_fmt = {
     %iothread_fmt,
     %model_fmt,
     %nvme_sub_fmt,
+    %usbdisk_sub_fmt,
     %product_fmt,
     %queues_fmt,
     %readonly_fmt,
@@ -759,6 +787,11 @@ for (my $i = 0; $i < $MAX_NVME_DISKS; $i++) {
     $drivedesc_hash_with_alloc->{"nvme$i"} = $desc_with_alloc->('nvme', $nvmedesc);
 }
 
+for (my $i = 0; $i < $MAX_USB_DISKS; $i++) {
+    $drivedesc_hash->{"usbdisk$i"} = $usbdiskdesc;
+    $drivedesc_hash_with_alloc->{"usbdisk$i"} = $desc_with_alloc->('usbdisk', $usbdiskdesc);
+}
+
 $drivedesc_hash->{efidisk0} = $efidisk_desc;
 $drivedesc_hash_with_alloc->{efidisk0} = $desc_with_alloc->('efidisk', $efidisk_desc);
 
@@ -782,6 +815,7 @@ sub valid_drive_names {
         (map { "virtio$_" } (0 .. ($MAX_VIRTIO_DISKS - 1))),
         (map { "sata$_" } (0 .. ($MAX_SATA_DISKS - 1))),
         (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
+        (map { "usbdisk$_" } (0 .. ($MAX_USB_DISKS - 1))),
         'efidisk0',
         'tpmstate0',
     );
@@ -920,7 +954,9 @@ sub parse_drive {
     $res->{interface} = $interface;
     $res->{index} = $index;
 
-    return if $interface eq 'nvme' && ($res->{file} eq 'none' || drive_is_cloudinit($res));
+    return
+        if ($interface eq 'nvme' || $interface eq 'usbdisk')
+        && ($res->{file} eq 'none' || $res->{file} eq 'cdrom' || drive_is_cloudinit($res));
 
     my $error = 0;
     foreach my $opt (qw(bps bps_rd bps_wr)) {
