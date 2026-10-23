@@ -80,6 +80,7 @@ use PVE::QemuServer::Drive qw(
     storage_allows_io_uring_default
 );
 use PVE::QemuServer::DriveDevice qw(print_drivedevice_full scsihw_infos);
+use PVE::QemuServer::EMMC;
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::MetaInfo;
@@ -1015,7 +1016,7 @@ PVE::JSONSchema::register_format('pve-qm-bootdev', \&verify_bootdev);
 sub verify_bootdev {
     my ($dev, $noerr) = @_;
 
-    my $special = $dev =~ m/^efidisk/ || $dev =~ m/^tpmstate/;
+    my $special = $dev =~ m/^efidisk/ || $dev =~ m/^tpmstate/ || $dev =~ m/^emmc/;
     return $dev if PVE::QemuServer::Drive::is_valid_drivename($dev) && !$special;
 
     my $check = sub {
@@ -2054,7 +2055,7 @@ sub parse_vm_config {
             } else {
                 $key = 'ide2' if $key eq 'cdrom';
                 my $fmt = $section->{schema}->{$key}->{format};
-                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata)$/) {
+                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata|emmc)$/) {
                     my $v = parse_drive($key, $value);
                     if (my $volid = filename_to_volume_id($vmid, $v->{file}, $v->{media})) {
                         $v->{file} = $volid;
@@ -3643,6 +3644,19 @@ sub config_to_command {
 
             my $live_restore = $live_restore_backing->{$ds};
 
+            if ($drive->{interface} eq 'emmc') {
+                PVE::QemuServer::EMMC::validate_image($storecfg, $drive);
+                if (!$is_template) {
+                    PVE::QemuServer::EMMC::assert_qemu_support($drive, $arch);
+                    my $pciaddr = print_pci_addr("sdhci-$ds", $arch);
+                    # QEMU lacks Auto CMD23. SDHCI v3 makes Linux use it with ADMA,
+                    # leaving eMMC in sendingdata state after multi-block reads.
+                    # SDHCI v2 makes the guest send CMD23 explicitly instead.
+                    push @$devices, '-device',
+                        "sdhci-pci,id=sdhci-$ds,sd-spec-version=2$pciaddr";
+                }
+            }
+
             if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev
                 if ($drive->{file} ne 'none') {
                     my $throttle_group =
@@ -4730,7 +4744,8 @@ sub vmconfig_hotplug_pending {
                 );
             } elsif (is_valid_drivename($opt)) {
                 die "skip\n"
-                    if !$hotplug_features->{disk} || $opt =~ m/(efidisk|ide|sata|tpmstate)(\d+)/;
+                    if !$hotplug_features->{disk}
+                    || $opt =~ m/(efidisk|ide|sata|emmc|tpmstate)(\d+)/;
                 vm_deviceunplug($vmid, $conf, $opt);
                 vmconfig_delete_or_detach_drive($vmid, $storecfg, $conf, $opt, $force);
             } elsif ($opt =~ m/^memory$/) {
@@ -5197,7 +5212,7 @@ sub vmconfig_update_disk {
 
             if ($drive->{file} ne $old_drive->{file}) {
 
-                die "skip\n" if !$hotplug;
+                die "skip\n" if !$hotplug || $drive->{interface} =~ m/^(emmc)$/;
 
                 # unplug and register as unused
                 vm_deviceunplug($vmid, $conf, $opt);
@@ -5217,6 +5232,9 @@ sub vmconfig_update_disk {
                     || safe_string_ne($drive->{ssd}, $old_drive->{ssd})
                     || safe_string_ne($drive->{vendor}, $old_drive->{vendor})
                     || safe_string_ne($drive->{ro}, $old_drive->{ro})
+                    || ($drive->{interface} eq 'emmc'
+                        && PVE::QemuServer::EMMC::needs_cold_restart($old_drive, $drive)
+                    )
                 ) {
                     die "skip\n";
                 }
@@ -5287,7 +5305,7 @@ sub vmconfig_update_disk {
         }
     }
 
-    die "skip\n" if !$hotplug || $opt =~ m/(ide|sata)(\d+)/;
+    die "skip\n" if !$hotplug || $opt =~ m/(ide|sata|emmc)(\d+)/;
     # hotplug new disks
     PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $drive->{file} !~ m|^/dev/.+|;
     vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive, $arch, $machine_type);
@@ -6566,6 +6584,7 @@ my $parse_backup_hints = sub {
     };
 
     my $virtdev_hash = {};
+    my $layout_drives = {};
     while (defined(my $line = <$fh>)) {
         if ($line =~ m/^\#qmdump\#map:(\S+):(\S+):(\S*):(\S*):$/) {
             my ($virtdev, $devname, $storeid, $format) = ($1, $2, $3, $4);
@@ -6587,6 +6606,11 @@ my $parse_backup_hints = sub {
             $check_storage->($storeid, $scfg); # permission and content type check
 
             $virtdev_hash->{$virtdev} = $devinfo->{$devname};
+        } elsif ($line =~ m/^(emmc\d+):\s*(\S+)\s*$/) {
+            my ($id, $value) = ($1, $2);
+            my $drive = parse_drive($id, $value)
+                or die "unable to parse disk '$id' in backup configuration\n";
+            $layout_drives->{$id} = $drive;
         } elsif ($line =~ m/^((?:ide|sata|scsi)\d+):\s*(.*)\s*$/) {
             my $virtdev = $1;
             my $drive = parse_drive($virtdev, $2);
@@ -6607,6 +6631,10 @@ my $parse_backup_hints = sub {
                 };
             }
         }
+    }
+
+    for my $id (keys %$layout_drives) {
+        $virtdev_hash->{$id}->{layout_drive} = $layout_drives->{$id} if $virtdev_hash->{$id};
     }
 
     return $virtdev_hash;
@@ -6649,6 +6677,13 @@ my $restore_allocate_devices = sub {
 
         PVE::Storage::activate_volumes($storecfg, [$volid]);
 
+        if (my $drive = $d->{layout_drive}) {
+            my $target_size = PVE::Storage::volume_size_info($storecfg, $volid, 10);
+            if ($drive->{interface} eq 'emmc') {
+                PVE::QemuServer::EMMC::validate_size($drive, $target_size);
+            }
+        }
+
         $map->{$virtdev} = $volid;
     }
 
@@ -6689,7 +6724,9 @@ sub restore_update_config_line {
         $net->{macaddr} = PVE::Tools::random_ether_addr($dc->{mac_prefix}) if $net->{macaddr};
         $netstr = PVE::QemuServer::Network::print_net($net);
         $res .= "$id: $netstr\n";
-    } elsif ($line =~ m/^((ide|scsi|virtio|sata|efidisk|tpmstate)\d+):\s*(\S+)\s*$/) {
+    } elsif (
+        $line =~ m/^((ide|scsi|virtio|sata|emmc|efidisk|tpmstate)\d+):\s*(\S+)\s*$/
+    ) {
         my $virtdev = $1;
         my $value = $3;
         my $di = parse_drive($virtdev, $value);
@@ -7971,6 +8008,10 @@ my sub clone_disk_copy_data {
                 'is-zero-initialized' => $sparseinit,
                 snapname => $snapname,
             };
+            if (my $view = $source->{'snapshot-image-options'}) {
+                delete $opts->{snapname};
+                $opts->{'source-image-options'} = $view;
+            }
             PVE::QemuServer::QemuImage::convert($drive->{file}, $newvolid, $size, $opts);
         }
     }
@@ -8005,6 +8046,8 @@ sub clone_disk {
         if $use_drive_mirror && $src_drivename eq 'tpmstate0';
 
     my $newvolid;
+    my $snapshot_view;
+    local $source->{'snapshot-image-options'};
 
     print "create " . ($full ? 'full' : 'linked') . " clone of drive ";
     print "$src_drivename " if $src_drivename;
@@ -8043,7 +8086,14 @@ sub clone_disk {
                 $vmid, $drive, $storecfg, $src_storeid, $storeid, $use_drive_mirror,
             );
 
-            $size = PVE::Storage::volume_size_info($storecfg, $drive->{file}, 10);
+            if (($drive->{interface} // '') eq 'emmc' && $snapname) {
+                $snapshot_view = PVE::QemuServer::EMMC::snapshot_view($storecfg, $drive, $snapname);
+                $size = $snapshot_view->{size};
+                $source->{'snapshot-image-options'} = $snapshot_view->{node}
+                    if $snapshot_view->{node};
+            } else {
+                $size = PVE::Storage::volume_size_info($storecfg, $drive->{file}, 10);
+            }
         }
         $source->{size} = $size;
         $newvolid = PVE::Storage::vdisk_alloc(
@@ -8060,6 +8110,10 @@ sub clone_disk {
         print("allocated target volume '$newvolid'\n");
 
         PVE::Storage::activate_volumes($storecfg, [$newvolid]);
+
+        if (($drive->{interface} // '') eq 'emmc') {
+            PVE::QemuServer::EMMC::validate_image($storecfg, { %$drive, file => $newvolid });
+        }
 
         if (drive_is_cloudinit($drive)) {
             # when cloning multiple disks (e.g. during clone_vm) it might be the last disk
@@ -8213,6 +8267,8 @@ sub bootorder_from_legacy {
         $conf,
         sub {
             my ($ds, $drive) = @_;
+
+            return if $drive->{interface} eq 'emmc';
 
             if (drive_is_cdrom($drive, 1)) {
                 if ($bootindex_hash->{d}) {

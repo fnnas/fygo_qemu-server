@@ -12,6 +12,7 @@ use PVE::Mapping::PCI;
 use PVE::Mapping::USB;
 use PVE::Storage;
 
+use PVE::QemuServer::Drive qw(parse_drive);
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::Virtiofs;
 
@@ -27,6 +28,18 @@ sub get_imported_volume_size {
     return $size;
 }
 
+sub emmc_rpmb_state_blockers {
+    my ($conf) = @_;
+
+    # QEMU 11.0.3 gives the RPMB and EXT_CSD migration subsections the same
+    # name. Such streams cannot be restored. Keep RAM state operations disabled
+    # for RPMB until fixed QEMU builds can be required on both ends.
+    return grep {
+        my $drive = parse_drive($_, $conf->{$_});
+        $drive && $drive->{'rpmb-partition-size'};
+    } sort grep { /^emmc\d+$/ } keys $conf->%*;
+}
+
 sub check_non_migratable_resources {
     my ($conf, $state, $noerr) = @_;
 
@@ -35,6 +48,7 @@ sub check_non_migratable_resources {
         push @blockers, "amd-sev" if $conf->{"amd-sev"};
         push @blockers, "intel-tdx" if $conf->{"intel-tdx"};
         push @blockers, "virtiofs" if PVE::QemuServer::Virtiofs::virtiofs_enabled($conf);
+        push @blockers, emmc_rpmb_state_blockers($conf);
     }
 
     if (scalar(@blockers) && !$noerr) {

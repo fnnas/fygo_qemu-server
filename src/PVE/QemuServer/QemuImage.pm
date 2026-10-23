@@ -97,6 +97,8 @@ my sub qcow2_target_image_opts {
 # snapname - Use this snapshot of the source image.
 # source-path-format - Indicate the format of the source when the source is a path. For PVE-managed
 # volumes, the format from the storage layer is always used.
+# source-image-options - Read from this private block graph after resolving the original source.
+# It already selects its snapshot and cannot be combined with snapname.
 sub convert {
     my ($src_volid, $dst_volid, $size, $opts) = @_;
 
@@ -130,6 +132,14 @@ sub convert {
     }
 
     die "source '$src_volid' is not a valid volid nor path for qemu-img convert\n" if !$src_path;
+
+    if (defined(my $image_options = $opts->{'source-image-options'})) {
+        die "source-image-options must describe a block graph\n" if ref($image_options) ne 'HASH';
+        die "source-image-options cannot be combined with snapname\n" if defined($snapname);
+        $src_path = 'json:' . encode_json($image_options);
+        $src_format = undef;
+        $src_is_iscsi = 0;
+    }
 
     my $dst_scfg = PVE::Storage::storage_config($storecfg, $dst_storeid);
     my $dst_format = checked_volume_format($storecfg, $dst_volid);

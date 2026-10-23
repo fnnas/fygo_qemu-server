@@ -5,6 +5,7 @@ use warnings;
 
 use IO::File;
 use IPC::Open2;
+use JSON ();
 use Storable qw(dclone);
 use Time::HiRes qw( usleep );
 
@@ -31,6 +32,7 @@ use PVE::QemuServer::Agent;
 use PVE::QemuServer::BlockJob;
 use PVE::QemuServer::CPUConfig;
 use PVE::QemuServer::Drive qw(checked_volume_format);
+use PVE::QemuServer::EMMC;
 use PVE::QemuServer::Helpers qw(min_version);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Monitor qw(mon_cmd vm_qmp_peer);
@@ -214,6 +216,12 @@ sub prepare {
     if (my $pid = PVE::QemuServer::check_running($vmid)) {
         die "can't migrate running VM without --online\n" if !$online;
         $running = $pid;
+
+        my @emmc_rpmb = PVE::QemuMigrate::Helpers::emmc_rpmb_state_blockers($conf);
+        die "can't live migrate VM with eMMC RPMB disks (QEMU state restore is unsupported): "
+            . join(', ', @emmc_rpmb)
+            . "; shut down the VM and migrate offline\n"
+            if @emmc_rpmb;
 
         if ($self->{is_replicated} && !$self->{replication_jobcfg}) {
             if ($self->{opts}->{force}) {
@@ -719,6 +727,19 @@ sub sync_offline_local_volumes {
     my $storecfg = $self->{storecfg};
     my $opts = $self->{opts};
 
+    my $layout_drives = {};
+    my $conf = $self->{vmconf};
+    for my $section ($conf, $conf->{pending} // {}, values %{ $conf->{snapshots} // {} }) {
+        PVE::QemuConfig->foreach_volume(
+            $section,
+            sub {
+                my ($key, $drive) = @_;
+                push $layout_drives->{ $drive->{file} }->@*, $drive
+                    if $drive->{interface} eq 'emmc';
+            },
+        );
+    }
+
     $self->log('info', "copying local disk images") if scalar(@volids);
 
     foreach my $volid (@volids) {
@@ -773,6 +794,46 @@ sub sync_offline_local_volumes {
         }
 
         $self->{volume_map}->{$volid} = $new_volid;
+
+        # Register the target for cleanup before checking its layout. Block
+        # storage may round up imports, invalidating capacity-dependent layouts.
+        if (my $drives = $layout_drives->{$volid}) {
+            my $target_size;
+            if ($opts->{remote}) {
+                my $res = PVE::Tunnel::write_tunnel(
+                    $self->{tunnel},
+                    60,
+                    'query-disk-size',
+                    { volid => $new_volid },
+                );
+                $target_size = $res->{size};
+            } else {
+                my ($storeid) = PVE::Storage::parse_volume_id($new_volid);
+                my $output = '';
+                PVE::Tools::run_command(
+                    [
+                        'pvesh',
+                        'get',
+                        "/nodes/$self->{node}/storage/$storeid/content/$new_volid",
+                        '--output-format',
+                        'json',
+                    ],
+                    timeout => 60,
+                    outfunc => sub { $output .= $_[0]; },
+                );
+                $target_size = JSON::decode_json($output)->{size};
+            }
+            die "unable to determine target size for volume '$new_volid'\n"
+                if !defined($target_size) || $target_size !~ m/^\d+$/ || !$target_size;
+            for my $drive (@$drives) {
+                if ($drive->{interface} eq 'emmc') {
+                    # Preserved snapshots may have their own size and layout.
+                    # An unchanged import cannot introduce a capacity mismatch.
+                    PVE::QemuServer::EMMC::validate_size($drive, $target_size)
+                        if $target_size != $local_volumes->{$volid}->{size};
+                }
+            }
+        }
         $self->log('info', "volume '$volid' is '$new_volid' on the target\n");
 
         eval { PVE::Storage::deactivate_volumes($storecfg, [$volid]); };

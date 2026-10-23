@@ -1,0 +1,37 @@
+/usr/bin/qemu-system-aarch64 \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -object 'monitor-qmp,chardev=qmp,id=monitor-qmp' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -object 'monitor-qmp,chardev=qmp-event,id=monitor-qmp-event' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -object '{"id":"throttle-drive-efidisk0","limits":{},"qom-type":"throttle-group"}' \
+  -blockdev '{"driver":"raw","file":{"driver":"file","filename":"/usr/share/pve-edk2-firmware//AAVMF_CODE.fd"},"node-name":"pflash0","read-only":true}' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":false,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":false,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/run/qemu-server/efidisk/8006-ovmf.fd","node-name":"e5ecb54a3863bf2f22d662c53f49ac4","read-only":false},"node-name":"f5ecb54a3863bf2f22d662c53f49ac4","read-only":false,"size":67108864},"node-name":"drive-efidisk0","read-only":false,"throttle-group":"throttle-drive-efidisk0"}' \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu max \
+  -m 512 \
+  -object '{"id":"throttle-drive-emmc0","limits":{},"qom-type":"throttle-group"}' \
+  -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pcie.0,addr=0x1e' \
+  -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pcie.0,addr=0x1f' \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'usb-ehci,id=ehci,bus=pcie.0,addr=0x1' \
+  -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
+  -device 'usb-kbd,id=keyboard,bus=ehci.0,port=2' \
+  -device 'virtio-gpu,id=vga,bus=pcie.0,addr=0x2' \
+  -device 'virtio-serial,id=spice,bus=pcie.0,addr=0x9' \
+  -chardev 'spicevmc,id=vdagent,name=vdagent' \
+  -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
+  -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -device 'sdhci-pci,id=sdhci-emmc0,sd-spec-version=2,bus=pci.4,addr=0x15' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"e690b2daac1bc06c0135f80984c552d","read-only":false},"node-name":"f690b2daac1bc06c0135f80984c552d","read-only":false},"node-name":"drive-emmc0","read-only":false,"throttle-group":"throttle-drive-emmc0"}' \
+  -device 'emmc,id=emmc0,drive=drive-emmc0,bus=pci.4/sdhci-emmc0/sd-bus,boot-partition-size=1048576,rpmb-partition-size=2097152' \
+  -machine 'pflash0=pflash0,pflash1=drive-efidisk0,accel=tcg,type=virt+pve0'

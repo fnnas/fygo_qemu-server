@@ -70,13 +70,15 @@ my sub is_fleecing_top_node {
 sub qdev_id_to_drive_id {
     my ($qdev_id) = @_;
 
-    if ($qdev_id =~ m|^/machine/peripheral/(virtio(\d+))/virtio-backend$|) {
+    if ($qdev_id =~ m{^/machine/peripheral/((?:virtio|emmc)\d+)/virtio-backend$}) {
         return $1;
     } elsif ($qdev_id =~ m{^/machine/(?:system|virt)\.flash0$}) {
         return 'pflash0';
     } elsif ($qdev_id =~ m{^/machine/(?:system|virt)\.flash1$}) {
         return 'efidisk0';
     }
+
+    return $1 if $qdev_id =~ m|^/machine/peripheral/(emmc\d+)$|;
 
     return $qdev_id; # for SCSI/SATA/IDE it's the same
 }
@@ -729,13 +731,16 @@ sub resize {
     my ($vmid, $deviceid, $storecfg, $volid, $size) = @_;
 
     my $running = PVE::QemuServer::Helpers::vm_running_locally($vmid);
+    my $drive_id = $deviceid =~ s/^drive-//r;
+
+    die "cannot resize eMMC disk '$drive_id' while the VM is running - shut down the VM first\n"
+        if $running && $drive_id =~ m/^emmc\d+$/;
 
     PVE::Storage::volume_resize($storecfg, $volid, $size, $running);
 
     return if !$running;
 
     my $block_info = get_block_info($vmid);
-    my $drive_id = $deviceid =~ s/^drive-//r;
     my $inserted = $block_info->{$drive_id}->{inserted}
         or die "no block node inserted for drive '$drive_id'\n";
 

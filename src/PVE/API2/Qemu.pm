@@ -34,6 +34,7 @@ use PVE::QemuServer::BlockJob;
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CPUConfig;
 use PVE::QemuServer::Drive qw(checked_volume_format checked_parse_volname);
+use PVE::QemuServer::EMMC;
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
 use PVE::QemuServer::Monitor qw(mon_cmd vm_qmp_peer);
@@ -527,6 +528,9 @@ my sub create_disks : prototype($$$$$$$$$$$) {
 
             $size = PVE::Tools::convert_size($size, 'gb' => 'kb'); # vdisk_alloc uses kb
 
+            PVE::QemuServer::EMMC::validate_size($disk, $size * 1024)
+                if $disk->{interface} eq 'emmc' && !$disk->{'import-from'};
+
             my $live_import = $is_live_import && $ds ne 'efidisk0';
             my $needs_creation = 1;
 
@@ -688,6 +692,12 @@ my sub create_disks : prototype($$$$$$$$$$$) {
                 $res->{$ds} = PVE::QemuServer::print_drive($disk);
             }
 
+            if ($disk->{interface} eq 'emmc') {
+                my $size = PVE::QemuServer::EMMC::image_size($storecfg, $disk);
+                PVE::QemuServer::EMMC::validate_size($disk, $size);
+                $disk->{size} = $size;
+                $res->{$ds} = PVE::QemuServer::print_drive($disk);
+            }
             print "$ds: successfully created disk '$res->{$ds}'\n";
         } else {
             PVE::Storage::check_volume_access($rpcenv, $authuser, $storecfg, $vmid, $volid);
@@ -721,6 +731,8 @@ my sub create_disks : prototype($$$$$$$$$$$) {
             my $size = PVE::Storage::volume_size_info($storecfg, $volid);
             die "volume $volid does not exist\n" if !$size;
             $disk->{size} = $size;
+
+            PVE::QemuServer::EMMC::validate_size($disk, $size) if $disk->{interface} eq 'emmc';
 
             $res->{$ds} = PVE::QemuServer::print_drive($disk);
         }
@@ -5106,6 +5118,16 @@ __PACKAGE__->register_method({
                     if !PVE::Storage::storage_can_replicate($storecfg, $storeid, $format);
             }
 
+            # Check the target layout against the actual source image before
+            # renaming it or removing its source configuration entry.
+            if ($drive->{interface} eq 'emmc') {
+                PVE::Storage::activate_volumes($storecfg, [$source_volid]);
+                my $size = PVE::Storage::volume_size_info($storecfg, $source_volid);
+                die "volume $source_volid does not exist\n" if !$size;
+                PVE::QemuServer::EMMC::validate_size($drive, $size)
+                    if $drive->{interface} eq 'emmc';
+            }
+
             return ($source_conf, $target_conf, $drive);
         };
 
@@ -6080,6 +6102,30 @@ __PACKAGE__->register_method({
 
             return if $size == $newsize;
 
+            # Another view of the same volume must not bypass its image layout
+            # constraints or a running eMMC device's resize restriction.
+            my $layout_refs = { pending => {} };
+            my $has_layout_refs;
+            for my $section ('current', 'pending') {
+                my $source = $section eq 'current' ? $conf : ($conf->{pending} // {});
+                my $target = $section eq 'current' ? $layout_refs : $layout_refs->{pending};
+                for my $key (
+                    grep { /^emmc\d+$/ && defined($source->{$_}) } keys %$source
+                ) {
+                    next if $section eq 'current' && $key eq $disk;
+                    $target->{$key} = $source->{$key};
+                    $has_layout_refs = 1;
+                }
+            }
+            die
+                "Cannot resize volume '$volid' through '$disk' while it is referenced by another"
+                . " eMMC disk - use that disk's resize operation or detach/revert the reference first\n"
+                if $has_layout_refs
+                && PVE::QemuServer::Drive::is_volume_in_use($storecfg, $layout_refs, undef, $volid);
+
+            PVE::QemuServer::EMMC::validate_size($drive, $newsize)
+                if $drive->{interface} eq 'emmc';
+
             PVE::Cluster::log_msg(
                 'info',
                 $authuser,
@@ -6089,6 +6135,11 @@ __PACKAGE__->register_method({
             PVE::QemuServer::Blockdev::resize(
                 $vmid, "drive-$disk", $storecfg, $volid, $newsize,
             );
+
+            if ($drive->{interface} eq 'emmc') {
+                $newsize = PVE::QemuServer::EMMC::image_size($storecfg, $drive);
+                PVE::QemuServer::EMMC::validate_size($drive, $newsize);
+            }
 
             $drive->{size} = $newsize;
             $conf->{$disk} = PVE::QemuServer::print_drive($drive);
