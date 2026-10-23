@@ -22,6 +22,7 @@ sub check_non_migratable_resources {
         push @blockers, "amd-sev" if $conf->{"amd-sev"};
         push @blockers, "intel-tdx" if $conf->{"intel-tdx"};
         push @blockers, "virtiofs" if PVE::QemuServer::Virtiofs::virtiofs_enabled($conf);
+        push @blockers, sort grep { /^nvme\d+$/ } keys $conf->%*;
     }
 
     if (scalar(@blockers) && !$noerr) {

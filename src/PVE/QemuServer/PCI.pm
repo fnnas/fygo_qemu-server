@@ -278,6 +278,7 @@ sub get_pci_addr_map {
         'scsihw2' => { bus => 4, addr => 1 },
         'scsihw3' => { bus => 4, addr => 2 },
         'scsihw4' => { bus => 4, addr => 3 },
+        (map { ("nvme$_" => { bus => 4, addr => 4 + $_ }) } 0 .. 15),
         }
         if !defined($pci_addr_map);
     return $pci_addr_map;
@@ -897,6 +898,7 @@ sub get_pci_bridges {
     # some scsi controllers can only have 7 scsi disks per controller,
     # so scsi14 and upwards need scsihw2,3,4 which live on bridge 4
     $bridges->{4} = 1 if $max_scsihw > 1 || $version_guard->(11, 1);
+    $bridges->{4} = 1 if grep { /^nvme\d+$/ } keys $conf->%*;
 
     # use cheap legacy igd check instead of a full parse_hostpci
     my $legacy_igd = 0;

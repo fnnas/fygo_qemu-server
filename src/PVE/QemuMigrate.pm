@@ -215,6 +215,10 @@ sub prepare {
         die "can't migrate running VM without --online\n" if !$online;
         $running = $pid;
 
+        my @nvme_disks = sort grep { /^nvme\d+$/ } keys $conf->%*;
+        die "can't live migrate VM with NVMe disks: " . join(', ', @nvme_disks) . "\n"
+            if @nvme_disks;
+
         if ($self->{is_replicated} && !$self->{replication_jobcfg}) {
             if ($self->{opts}->{force}) {
                 $self->log(

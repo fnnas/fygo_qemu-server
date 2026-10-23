@@ -184,6 +184,14 @@ sub print_drivedevice_full {
             }
         }
         $device .= ",wwn=$drive->{wwn}" if $drive->{wwn};
+    } elsif ($drive->{interface} eq 'nvme') {
+        my $pciaddr = print_pci_addr($drive_id, $arch);
+        $device = "nvme,id=$drive_id,drive=drive-$drive_id$pciaddr";
+        my $intel_id = $drive->{'use-intel-id'} // 1;
+        $device .= ',use-intel-id=' . ($intel_id ? 'on' : 'off');
+        for my $option (qw(max_ioqpairs msix_qsize mdts)) {
+            $device .= ",$option=$drive->{$option}" if defined($drive->{$option});
+        }
     } elsif ($drive->{interface} eq 'usb') {
         die "implement me";
         #  -device ide-drive,bus=ide.1,unit=0,drive=drive-ide0-1-0,id=ide0-1-0
@@ -196,6 +204,8 @@ sub print_drivedevice_full {
     if (my $serial = $drive->{serial}) {
         $serial = _escape_qemu_arg_value(URI::Escape::uri_unescape($serial));
         $device .= ",serial=$serial";
+    } elsif ($drive->{interface} eq 'nvme') {
+        $device .= ",serial=$drive_id";
     }
 
     if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev

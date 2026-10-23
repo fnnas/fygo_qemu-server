@@ -156,6 +156,7 @@ my $MAX_IDE_DISKS = 4;
 our $MAX_SCSI_DISKS = 31;
 my $MAX_VIRTIO_DISKS = 16;
 our $MAX_SATA_DISKS = 6;
+my $MAX_NVME_DISKS = 16;
 our $MAX_UNUSED_DISKS = 256;
 our $NEW_DISK_RE = qr!^(([^/:\s]+):)?(\d+(\.\d+)?)$!;
 
@@ -345,6 +346,37 @@ my %wwn_fmt = (
     },
 );
 
+my %nvme_sub_fmt = (
+    max_ioqpairs => {
+        type => 'integer',
+        description => "Maximum number of I/O queue pairs.",
+        minimum => 1,
+        maximum => 65535,
+        optional => 1,
+    },
+    msix_qsize => {
+        type => 'integer',
+        description => "Number of MSI-X vectors supported by the device.",
+        minimum => 1,
+        maximum => 2048,
+        optional => 1,
+    },
+    mdts => {
+        type => 'integer',
+        description => "Maximum data transfer size as a power of two in units of the minimum"
+            . " memory page size.",
+        minimum => 1,
+        maximum => 9, # QEMU requires 2**mdts + 1 <= IOV_MAX (1024 on Linux).
+        optional => 1,
+    },
+    'use-intel-id' => {
+        type => 'boolean',
+        description => "Use the Intel PCI vendor and device IDs.",
+        default => 1,
+        optional => 1,
+    },
+);
+
 my $add_throttle_desc = sub {
     my ($key, $type, $what, $unit, $longunit, $minimum) = @_;
     my $d = {
@@ -481,6 +513,22 @@ my $scsidesc = {
 };
 PVE::JSONSchema::register_standard_option("pve-qm-scsi", $scsidesc);
 
+my $nvme_fmt = {
+    %drivedesc_base, %readonly_fmt, %nvme_sub_fmt,
+    media => { %{ $drivedesc_base{media} }, enum => ['disk'] },
+};
+# NVMe controllers do not support configurable block error actions or IOThreads.
+delete $nvme_fmt->@{qw(rerror werror)};
+
+my $nvmedesc = {
+    optional => 1,
+    type => 'string',
+    format => $nvme_fmt,
+    description => "Use volume as NVMe hard disk (n is 0 to "
+        . ($MAX_NVME_DISKS - 1) . ").",
+};
+PVE::JSONSchema::register_standard_option("pve-qm-nvme", $nvmedesc);
+
 my $sata_fmt = {
     %drivedesc_base, %ssd_fmt, %wwn_fmt,
 };
@@ -608,6 +656,7 @@ my $alldrive_fmt = {
     %drivedesc_base,
     %iothread_fmt,
     %model_fmt,
+    %nvme_sub_fmt,
     %product_fmt,
     %queues_fmt,
     %readonly_fmt,
@@ -705,6 +754,11 @@ for (my $i = 0; $i < $MAX_VIRTIO_DISKS; $i++) {
     $drivedesc_hash_with_alloc->{"virtio$i"} = $desc_with_alloc->('virtio', $virtiodesc);
 }
 
+for (my $i = 0; $i < $MAX_NVME_DISKS; $i++) {
+    $drivedesc_hash->{"nvme$i"} = $nvmedesc;
+    $drivedesc_hash_with_alloc->{"nvme$i"} = $desc_with_alloc->('nvme', $nvmedesc);
+}
+
 $drivedesc_hash->{efidisk0} = $efidisk_desc;
 $drivedesc_hash_with_alloc->{efidisk0} = $desc_with_alloc->('efidisk', $efidisk_desc);
 
@@ -727,6 +781,7 @@ sub valid_drive_names {
         (map { "scsi$_" } (0 .. ($MAX_SCSI_DISKS - 1))),
         (map { "virtio$_" } (0 .. ($MAX_VIRTIO_DISKS - 1))),
         (map { "sata$_" } (0 .. ($MAX_SATA_DISKS - 1))),
+        (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
         'efidisk0',
         'tpmstate0',
     );
@@ -864,6 +919,8 @@ sub parse_drive {
     return if !$res;
     $res->{interface} = $interface;
     $res->{index} = $index;
+
+    return if $interface eq 'nvme' && ($res->{file} eq 'none' || drive_is_cloudinit($res));
 
     my $error = 0;
     foreach my $opt (qw(bps bps_rd bps_wr)) {

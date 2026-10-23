@@ -403,7 +403,7 @@ EODESC
         format => 'pve-qm-bootdisk',
         description =>
             "Enable booting from specified disk. Deprecated: Use 'boot: order=foo;bar' instead.",
-        pattern => '(ide|sata|scsi|virtio)\d+',
+        pattern => '(ide|sata|scsi|virtio|nvme)\d+',
     },
     smp => {
         optional => 1,
@@ -2054,7 +2054,7 @@ sub parse_vm_config {
             } else {
                 $key = 'ide2' if $key eq 'cdrom';
                 my $fmt = $section->{schema}->{$key}->{format};
-                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata)$/) {
+                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata|nvme)$/) {
                     my $v = parse_drive($key, $value);
                     if (my $volid = filename_to_volume_id($vmid, $v->{file}, $v->{media})) {
                         $v->{file} = $volid;
@@ -4730,7 +4730,7 @@ sub vmconfig_hotplug_pending {
                 );
             } elsif (is_valid_drivename($opt)) {
                 die "skip\n"
-                    if !$hotplug_features->{disk} || $opt =~ m/(efidisk|ide|sata|tpmstate)(\d+)/;
+                    if !$hotplug_features->{disk} || $opt =~ m/(efidisk|ide|sata|nvme|tpmstate)(\d+)/;
                 vm_deviceunplug($vmid, $conf, $opt);
                 vmconfig_delete_or_detach_drive($vmid, $storecfg, $conf, $opt, $force);
             } elsif ($opt =~ m/^memory$/) {
@@ -5197,7 +5197,7 @@ sub vmconfig_update_disk {
 
             if ($drive->{file} ne $old_drive->{file}) {
 
-                die "skip\n" if !$hotplug;
+                die "skip\n" if !$hotplug || $drive->{interface} eq 'nvme';
 
                 # unplug and register as unused
                 vm_deviceunplug($vmid, $conf, $opt);
@@ -5217,6 +5217,9 @@ sub vmconfig_update_disk {
                     || safe_string_ne($drive->{ssd}, $old_drive->{ssd})
                     || safe_string_ne($drive->{vendor}, $old_drive->{vendor})
                     || safe_string_ne($drive->{ro}, $old_drive->{ro})
+                    || ($drive->{interface} eq 'nvme' && grep {
+                        safe_string_ne($drive->{$_}, $old_drive->{$_})
+                    } qw(serial max_ioqpairs msix_qsize mdts use-intel-id))
                 ) {
                     die "skip\n";
                 }
@@ -5287,7 +5290,7 @@ sub vmconfig_update_disk {
         }
     }
 
-    die "skip\n" if !$hotplug || $opt =~ m/(ide|sata)(\d+)/;
+    die "skip\n" if !$hotplug || $opt =~ m/(ide|sata|nvme)(\d+)/;
     # hotplug new disks
     PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $drive->{file} !~ m|^/dev/.+|;
     vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive, $arch, $machine_type);
@@ -6689,7 +6692,7 @@ sub restore_update_config_line {
         $net->{macaddr} = PVE::Tools::random_ether_addr($dc->{mac_prefix}) if $net->{macaddr};
         $netstr = PVE::QemuServer::Network::print_net($net);
         $res .= "$id: $netstr\n";
-    } elsif ($line =~ m/^((ide|scsi|virtio|sata|efidisk|tpmstate)\d+):\s*(\S+)\s*$/) {
+    } elsif ($line =~ m/^((ide|scsi|virtio|sata|nvme|efidisk|tpmstate)\d+):\s*(\S+)\s*$/) {
         my $virtdev = $1;
         my $value = $3;
         my $di = parse_drive($virtdev, $value);
