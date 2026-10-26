@@ -1,0 +1,31 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -mon 'chardev=qmp,mode=control' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -mon 'chardev=qmp-event,mode=control' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
+  -m 512 \
+  -object '{"id":"throttle-drive-scsi0","limits":{},"qom-type":"throttle-group"}' \
+  -global 'ICH9-LPC.disable_s3=1' \
+  -global 'ICH9-LPC.disable_s4=1' \
+  -readconfig /usr/share/qemu-server/pve-azw-me-pro.cfg \
+  -device 'usb-tablet,id=tablet,bus=xhci.0,port=2' \
+  -device 'VGA,id=vga,bus=pcie.0,addr=0x1' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -device 'ide-cd,bus=asm0.0,unit=0,id=ide2,bootindex=200' \
+  -device 'virtio-scsi-pci,id=virtioscsi0,bus=pci.3,addr=0x1' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"e3b2553803d55d43b9986a0aac3e9a7","read-only":false},"node-name":"f3b2553803d55d43b9986a0aac3e9a7","read-only":false},"node-name":"drive-scsi0","read-only":false,"throttle-group":"throttle-drive-scsi0"}' \
+  -device 'scsi-hd,bus=virtioscsi0.0,channel=0,scsi-id=0,lun=0,drive=drive-scsi0,id=scsi0,device_id=drive-scsi0,write-cache=on' \
+  -netdev 'type=tap,id=net0,ifname=tap8006i0,script=/usr/libexec/qemu-server/pve-bridge,downscript=/usr/libexec/qemu-server/pve-bridgedown,vhost=on' \
+  -device 'virtio-net-pci,mac=52:54:00:00:00:01,netdev=net0,bus=pcie.00.1c.2,addr=0x0,id=net0,rx_queue_size=1024,tx_queue_size=256,bootindex=300,host_mtu=1500' \
+  -machine 'sata=off,usb=off,hpet=off,type=azw-me-pro-6+pve0'

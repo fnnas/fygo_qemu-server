@@ -1,0 +1,34 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -object 'monitor-qmp,chardev=qmp,id=monitor-qmp' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -object 'monitor-qmp,chardev=qmp-event,id=monitor-qmp-event' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
+  -m 512 \
+  -object '{"id":"throttle-drive-nvme0","limits":{},"qom-type":"throttle-group"}' \
+  -object '{"id":"throttle-drive-nvme12","limits":{},"qom-type":"throttle-group"}' \
+  -global 'ICH9-LPC.disable_s3=1' \
+  -global 'ICH9-LPC.disable_s4=1' \
+  -readconfig /usr/share/qemu-server/pve-azw-me-pro.cfg \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'usb-tablet,id=tablet,bus=xhci.0,port=2' \
+  -device 'VGA,id=vga,bus=pcie.0,addr=0x1' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -device 'nvme-subsys,id=nvme-subsys-nvme0,nqn=vm8006-nvme0' \
+  -device 'nvme,id=nvme-ctrl-nvme0,subsys=nvme-subsys-nvme0,bus=pcie.00.1c.0,addr=0x0,multifunction=on,serial=00:1c.0-01:00.0,use-intel-id=on' \
+  -device 'nvme,id=nvme-ctrl-nvme0-path1,subsys=nvme-subsys-nvme0,bus=pcie.00.1c.0,addr=0x0.1,serial=00:1c.0-01:00.0,use-intel-id=on' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"e119e463707ef5b322ab615f629db5d","read-only":false},"node-name":"f119e463707ef5b322ab615f629db5d","read-only":false},"node-name":"drive-nvme0","read-only":false,"throttle-group":"throttle-drive-nvme0"}' \
+  -device 'nvme-ns,id=nvme0,drive=drive-nvme0,bus=nvme-ctrl-nvme0,nsid=1,uuid=16e0f93a-1d1b-59ec-ad78-40a0cc5a097e,bootindex=101,write-cache=on' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-1.raw","node-name":"edf8396dad27f161193d15ea5d451df","read-only":false},"node-name":"fdf8396dad27f161193d15ea5d451df","read-only":false},"node-name":"drive-nvme12","read-only":false,"throttle-group":"throttle-drive-nvme12"}' \
+  -device 'nvme-ns,id=nvme12,drive=drive-nvme12,bus=nvme-ctrl-nvme0,nsid=12,uuid=0841cbf0-6720-58f7-aa10-b9490745a505,bootindex=100,write-cache=on' \
+  -machine 'sata=off,usb=off,type=azw-me-pro-6+pve0'

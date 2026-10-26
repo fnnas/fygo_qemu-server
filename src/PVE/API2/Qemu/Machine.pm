@@ -42,7 +42,7 @@ __PACKAGE__->register_method({
                 },
                 type => {
                     type => 'string',
-                    enum => ['q35', 'i440fx'],
+                    enum => ['q35', 'i440fx', 'virt', 'custom'],
                     description => "The machine type.",
                 },
                 version => {
@@ -88,11 +88,11 @@ __PACKAGE__->register_method({
                 }
             }
 
-            return [
-                sort {
-                    PVE::QemuServer::Machine::machine_version_cmp($b->{id}, $a->{id})
-                } ($machines->@*, $pve_machines->@*)
-            ]; # merge & sort
+            my @sorted = sort {
+                PVE::QemuServer::Machine::machine_version_cmp($b->{id}, $a->{id})
+            } ($machines->@*, $pve_machines->@*);
+            my $custom = PVE::QemuServer::Machine::installed_custom_machines($arch);
+            return [@sorted, $custom->@*];
         };
         die "could not load supported machine versions - $@\n" if $@;
         return $supported_machine_list;

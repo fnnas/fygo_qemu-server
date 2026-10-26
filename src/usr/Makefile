@@ -8,11 +8,12 @@ DBUSDIR := $(DESTDIR)/usr/share/dbus-1
 SHAREDIR=$(DESTDIR)/$(PREFIX)/share/$(PACKAGE)
 
 .PHONY: install
-install: pve-usb.cfg pve-q35.cfg pve-q35-4.0.cfg bootsplash.jpg modules-load.conf pve-bridge pve-bridge-hotplug pve-bridgedown
+install: pve-usb.cfg pve-q35.cfg pve-q35-4.0.cfg pve-azw-me-pro.cfg bootsplash.jpg modules-load.conf pve-bridge pve-bridge-hotplug pve-bridgedown
 	install -d $(SHAREDIR)
 	install -m 0644 pve-usb.cfg $(SHAREDIR)
 	install -m 0644 pve-q35.cfg $(SHAREDIR)
 	install -m 0644 pve-q35-4.0.cfg $(SHAREDIR)
+	install -m 0644 pve-azw-me-pro.cfg $(SHAREDIR)
 	install -m 0644 -D bootsplash.jpg $(SHAREDIR)
 	install -D -m 0644 modules-load.conf $(LIBDIR)/modules-load.d/qemu-server.conf
 	install -d $(LIBEXECDIR)
