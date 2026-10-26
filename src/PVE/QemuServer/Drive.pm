@@ -1025,6 +1025,8 @@ sub is_volume_in_use {
 
     undef $skip_drive;
 
+    return 1 if $conf->{pending} && $scan_config->($conf->{pending});
+
     for my $snap (values %{ $conf->{snapshots} }) {
         return 1 if $scan_config->($snap);
     }

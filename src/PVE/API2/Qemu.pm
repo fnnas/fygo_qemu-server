@@ -6871,6 +6871,13 @@ __PACKAGE__->register_method({
                 },
                 'disk-import' => $PVE::StorageTunnel::cmd_schema->{'disk-import'},
                 'query-disk-import' => $PVE::StorageTunnel::cmd_schema->{'query-disk-import'},
+                'query-disk-size' => {
+                    volid => {
+                        type => 'string',
+                        format => 'pve-volume-id',
+                        description => 'Volume imported by this migration tunnel',
+                    },
+                },
                 bwlimit => $PVE::StorageTunnel::cmd_schema->{bwlimit},
             };
 
@@ -7027,6 +7034,15 @@ __PACKAGE__->register_method({
                     my ($params) = @_;
 
                     return PVE::StorageTunnel::handle_query_disk_import($state, $params);
+                },
+                'query-disk-size' => sub {
+                    my ($params) = @_;
+
+                    return {
+                        size => PVE::QemuMigrate::Helpers::get_imported_volume_size(
+                            $state, $params->{volid},
+                        ),
+                    };
                 },
                 'start' => sub {
                     my ($params) = @_;
