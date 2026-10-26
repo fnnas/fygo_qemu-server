@@ -13,6 +13,11 @@ use PVE::QemuServer::Helpers;
 sub validate_options {
     my ($drive) = @_;
 
+    # Property strings use decimal integers; QEMU treats a leading zero as octal.
+    for my $option (qw(boot-partition-size rpmb-partition-size boot-config)) {
+        $drive->{$option} = 0 + $drive->{$option} if defined($drive->{$option});
+    }
+
     my $boot = $drive->{'boot-partition-size'} // 0;
     my $rpmb = $drive->{'rpmb-partition-size'} // 0;
     die "eMMC boot-partition-size must be a multiple of 128 KiB, at most 32640 KiB\n"
@@ -45,6 +50,17 @@ sub validate_size {
         $size - 2 * ($drive->{'boot-partition-size'} // 0) - ($drive->{'rpmb-partition-size'} // 0);
     die "eMMC image must contain a non-empty user area after BOOT1, BOOT2 and RPMB\n"
         if $user <= 0;
+    # QEMU's CSD encodes small eMMC capacities in 2 MiB steps. Smaller user
+    # areas are reported larger than their backing, causing out-of-range I/O.
+    die "eMMC user area must be at least 2 MiB"
+        . " (image size: $size bytes, user area: $user bytes)\n"
+        if $user < 2 * 1024**2;
+    # QEMU also checks BOOT1/BOOT2 command addresses against the user size.
+    # Keep every advertised boot partition sector accessible.
+    my $boot = $drive->{'boot-partition-size'} // 0;
+    die "eMMC user area must be at least as large as each boot partition"
+        . " (user area: $user bytes, boot partition: $boot bytes)\n"
+        if $user < $boot;
     # EXT_CSD SEC_COUNT is a 32-bit count of 512-byte sectors.
     die "eMMC user area exceeds the 32-bit sector count (maximum 2 TiB minus 512 bytes)\n"
         if $user > 0xffffffff * 512;

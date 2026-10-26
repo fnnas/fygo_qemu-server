@@ -46,6 +46,73 @@ for my $with_alloc (0, 1) {
     is($@, '', "eMMC passes API schema validation (allocation=$with_alloc)");
 }
 
+{
+    my $padded_key = '00000aBc' x 8;
+    for my $case (
+        ['boot-partition-size=04194304', 'boot-partition-size=4194304', 2 * 4194304],
+        [
+            "auth-key=$padded_key,rpmb-partition-size=00131072",
+            "auth-key=$padded_key,rpmb-partition-size=131072",
+            131072,
+        ],
+        [
+            'boot-config=010,boot-partition-size=4194304',
+            'boot-config=10,boot-partition-size=4194304',
+            2 * 4194304,
+        ],
+        [
+            "auth-key=$padded_key,boot-config=010,boot-partition-size=04194304,rpmb-partition-size=00131072",
+            "auth-key=$padded_key,boot-config=10,boot-partition-size=4194304,rpmb-partition-size=131072",
+            2 * 4194304 + 131072,
+        ],
+        [
+            'boot-config=000,boot-partition-size=000,rpmb-partition-size=000',
+            'boot-config=0,boot-partition-size=0,rpmb-partition-size=0',
+            0,
+        ],
+    ) {
+        my ($input, $canonical, $aux) = @$case;
+        my $parsed = parse_drive('emmc0', "$volume,$input");
+        ok($parsed, "accept decimal eMMC integers with leading zeroes: $input");
+        is(
+            print_drive($parsed),
+            "$volume,$canonical",
+            'printing normalizes integers and preserves authentication key bytes',
+        );
+        my %expected = map { split('=', $_, 2) } split(',', $canonical);
+        my $device = 'emmc,id=emmc0,drive=drive-emmc0,bus=pci.4/sdhci-emmc0/sd-bus';
+        for my $option (qw(boot-partition-size rpmb-partition-size boot-config auth-key)) {
+            $device .= ",$option=$expected{$option}" if defined($expected{$option});
+        }
+        is(
+            print_drivedevice_full({}, {}, 8006, $parsed, 'x86_64', 'pc-q35-11.1'),
+            $device,
+            'QEMU receives decimal integers without octal prefixes and the unmodified key',
+        );
+        is(
+            PVE::QemuServer::EMMC::validate_size($parsed, 1024**3 + $aux),
+            1024**3,
+            'layout validation uses the same decimal partition sizes as QEMU',
+        );
+        for my $with_alloc (0, 1) {
+            my $schema = {
+                type => 'object',
+                additionalProperties => 0,
+                properties => PVE::QemuServer::json_config_properties({}, $with_alloc),
+            };
+            eval { PVE::JSONSchema::validate({ emmc0 => "$volume,$input" }, $schema); };
+            is($@, '', "leading zeroes pass API validation (allocation=$with_alloc)");
+        }
+    }
+    my $omitted = parse_drive('emmc0', $volume);
+    is(print_drive($omitted), $volume, 'omitted eMMC integers remain omitted');
+    is(
+        print_drivedevice_full({}, {}, 8006, $omitted, 'x86_64', 'pc-q35-11.1'),
+        'emmc,id=emmc0,drive=drive-emmc0,bus=pci.4/sdhci-emmc0/sd-bus',
+        'omitted eMMC options are not added to the QEMU command',
+    );
+}
+
 for my $bad (
     'media=cdrom',
     'serial=foo',
@@ -58,13 +125,16 @@ for my $bad (
     'removable=1',
     'queues=2',
     'boot-partition-size=1',
+    'boot-partition-size=00001',
     'boot-partition-size=33554432',
     'rpmb-partition-size=1',
+    'rpmb-partition-size=00001',
     'rpmb-partition-size=16908288',
     'boot-config=1',
     'boot-config=8',
     'boot-config=3',
     'boot-config=24',
+    'boot-config=00024',
     'boot-config=4',
     'boot-config=128',
     'auth-key=abcd',
@@ -83,12 +153,60 @@ ok(
 );
 
 my $aux = 4 * 1024**2;
-for my $user (512, 1024**2, 1024**3, 2 * 1024**3, 2 * 1024**3 + 512, 32 * 1024**3) {
+for my $user (2 * 1024**2, 4 * 1024**2, 1024**3, 2 * 1024**3, 2 * 1024**3 + 512, 32 * 1024**3) {
     is(
         PVE::QemuServer::EMMC::validate_size($drive, $user + $aux),
         $user,
         "image layout exposes $user user bytes",
     );
+}
+for my $reserved (
+    {},
+    { 'boot-partition-size' => 4194304 },
+    { 'boot-partition-size' => 4194304, 'rpmb-partition-size' => 2097152 },
+) {
+    my $drive = {%$reserved};
+    my $offset =
+        2 * ($drive->{'boot-partition-size'} // 0) + ($drive->{'rpmb-partition-size'} // 0);
+    for my $user (512, 131072, 262144, 524288, 1024**2, 2 * 1024**2 - 512) {
+        eval { PVE::QemuServer::EMMC::validate_size($drive, $offset + $user); };
+        like(
+            $@,
+            qr/eMMC user area must be at least 2 MiB/,
+            'reject user capacity below the minimum represented correctly by QEMU CSD',
+        );
+    }
+    my $minimum = $drive->{'boot-partition-size'} || 2 * 1024**2;
+    is(
+        PVE::QemuServer::EMMC::validate_size($drive, $offset + $minimum),
+        $minimum,
+        'the minimum user area accounts for both CSD capacity and boot partition size',
+    );
+}
+for my $rpmb (0, 2097152) {
+    for my $case (
+        [131072, 2 * 1024**2, 1],
+        [2 * 1024**2, 2 * 1024**2, 1],
+        [4 * 1024**2, 2 * 1024**2, 0],
+        [4 * 1024**2, 4 * 1024**2, 1],
+        [16 * 1024**2, 8 * 1024**2, 0],
+        [16 * 1024**2, 16 * 1024**2, 1],
+        [32640 * 1024, 16 * 1024**2, 0],
+        [32640 * 1024, 32 * 1024**2, 1],
+    ) {
+        my ($boot, $user, $allowed) = @$case;
+        my $drive = { 'boot-partition-size' => $boot, 'rpmb-partition-size' => $rpmb };
+        eval { PVE::QemuServer::EMMC::validate_size($drive, 2 * $boot + $rpmb + $user); };
+        if ($allowed) {
+            is($@, '', 'user area at least as large as BOOT1/BOOT2 remains valid');
+        } else {
+            like(
+                $@,
+                qr/eMMC user area must be at least as large as each boot partition/,
+                'reject user areas which prevent reading the end of BOOT1/BOOT2',
+            );
+        }
+    }
 }
 for my $size (
     undef, 0, $aux - 512, $aux, $aux + 513,

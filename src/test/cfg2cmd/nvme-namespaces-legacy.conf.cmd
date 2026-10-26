@@ -1,0 +1,31 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -object 'monitor-qmp,chardev=qmp,id=monitor-qmp' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -object 'monitor-qmp,chardev=qmp-event,id=monitor-qmp-event' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
+  -m 512 \
+  -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pci.0,addr=0x1e' \
+  -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pci.0,addr=0x1f' \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'piix3-usb-uhci,id=uhci,bus=pci.0,addr=0x1.0x2' \
+  -device 'usb-tablet,id=tablet,bus=uhci.0,port=1' \
+  -device 'VGA,id=vga,bus=pci.0,addr=0x2' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -device 'nvme-subsys,id=nvme-subsys-nvme0,nqn=vm8006-nvme0' \
+  -device 'nvme,id=nvme-ctrl-nvme0,subsys=nvme-subsys-nvme0,bus=pci.4,addr=0x4,serial=nvme0,use-intel-id=on' \
+  -drive 'file=/var/lib/vz/images/8006/vm-8006-disk-0.raw,if=none,id=drive-nvme0,format=raw,cache=none,aio=io_uring,detect-zeroes=on' \
+  -device 'nvme-ns,id=nvme0,drive=drive-nvme0,bus=nvme-ctrl-nvme0,nsid=1,uuid=16e0f93a-1d1b-59ec-ad78-40a0cc5a097e,logical_block_size=4096,ms=8,pi=2,physical_block_size=4096,write-cache=on' \
+  -drive 'file=/var/lib/vz/images/8006/vm-8006-disk-1.raw,if=none,id=drive-nvme1,format=raw,cache=none,aio=io_uring,detect-zeroes=on' \
+  -device 'nvme-ns,id=nvme1,drive=drive-nvme1,bus=nvme-ctrl-nvme0,nsid=2,uuid=745e87a9-c606-5105-a67b-94bd464d7a56,write-cache=on' \
+  -machine 'type=pc-i440fx-9.2+pve0'

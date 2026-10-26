@@ -8,6 +8,7 @@ use URI::Escape;
 use PVE::QemuServer::Drive qw (drive_is_cdrom);
 use PVE::QemuServer::Helpers qw(kvm_user_version min_version);
 use PVE::QemuServer::Machine;
+use PVE::QemuServer::NVMe;
 use PVE::QemuServer::PCI qw(print_pci_addr);
 
 use base qw(Exporter);
@@ -200,13 +201,12 @@ sub print_drivedevice_full {
         }
         $device .= ",wwn=$drive->{wwn}" if $drive->{wwn};
     } elsif ($drive->{interface} eq 'nvme') {
+        if (PVE::QemuServer::NVMe::has_explicit_namespace($conf, $drive)) {
+            return PVE::QemuServer::NVMe::namespace_device($conf, $vmid, $drive, $arch);
+        }
         my $pciaddr = print_pci_addr($drive_id, $arch);
         $device = "nvme,id=$drive_id,drive=drive-$drive_id$pciaddr";
-        my $intel_id = $drive->{'use-intel-id'} // 1;
-        $device .= ',use-intel-id=' . ($intel_id ? 'on' : 'off');
-        for my $option (qw(max_ioqpairs msix_qsize mdts)) {
-            $device .= ",$option=$drive->{$option}" if defined($drive->{$option});
-        }
+        $device .= PVE::QemuServer::NVMe::controller_options($drive);
     } elsif ($drive->{interface} eq 'usbdisk') {
         my $port = $drive->{index} + 1;
         $device = "usb-storage,id=$drive_id,drive=drive-$drive_id,bus=usbdisk-xhci.0,port=$port";
@@ -217,7 +217,7 @@ sub print_drivedevice_full {
 
     $device .= ",bootindex=$drive->{bootindex}" if $drive->{bootindex};
 
-    if (my $serial = $drive->{serial}) {
+    if (defined(my $serial = $drive->{serial})) {
         $serial = _escape_qemu_arg_value(URI::Escape::uri_unescape($serial));
         $device .= ",serial=$serial";
     } elsif ($drive->{interface} eq 'nvme' || $drive->{interface} eq 'usbdisk') {

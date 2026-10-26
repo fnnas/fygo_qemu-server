@@ -10,10 +10,23 @@ use PVE::JSONSchema qw(parse_property_string);
 use PVE::Mapping::Dir;
 use PVE::Mapping::PCI;
 use PVE::Mapping::USB;
+use PVE::Storage;
 
 use PVE::QemuServer::Drive qw(parse_drive);
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::Virtiofs;
+
+sub get_imported_volume_size {
+    my ($state, $volid) = @_;
+
+    die "volume '$volid' was not imported by this migration tunnel\n"
+        if !$state->{cleanup}->{volumes}->{$volid};
+    PVE::Storage::activate_volumes($state->{storecfg}, [$volid]);
+    my $size = PVE::Storage::volume_size_info($state->{storecfg}, $volid, 10);
+    die "unable to determine size for imported volume '$volid'\n"
+        if !defined($size) || $size <= 0;
+    return $size;
+}
 
 sub emmc_rpmb_state_blockers {
     my ($conf) = @_;

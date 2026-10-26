@@ -14,12 +14,57 @@ use PVE::QemuMigrate::Helpers;
 use PVE::QemuServer;
 use PVE::QemuServer::Drive qw(is_valid_drivename parse_drive print_drive);
 use PVE::QemuServer::DriveDevice qw(print_drivedevice_full);
+use PVE::QemuServer::PCI;
+use PVE::QemuServer::USB;
 
 my $cluster_config = Test::MockModule->new('PVE::Cluster');
 $cluster_config->mock(cfs_read_file => sub { return {}; });
 
 my $volume = 'local:8006/vm-8006-disk-0.raw';
 my $value = "$volume,discard=on,removable=0,ro=1,serial=custom%2Cserial";
+
+for my $arch ('x86_64', 'aarch64') {
+    my $conf = { template => 1, usbdisk0 => undef, nvme0 => undef, emmc0 => undef };
+    my @controllers = PVE::QemuServer::USB::get_usb_controllers($conf, $arch, '9.2');
+    ok(
+        !grep(/id=usbdisk-xhci,/, @controllers),
+        "undefined template disks do not create a USB storage controller ($arch)",
+    );
+    $conf->{usbdisk0} = $volume;
+    @controllers = PVE::QemuServer::USB::get_usb_controllers($conf, $arch, '9.2');
+    is(
+        scalar(grep(/id=usbdisk-xhci,/, @controllers)),
+        1,
+        "configured template USB disk keeps its storage controller ($arch)",
+    );
+
+    for my $q35 ($arch eq 'x86_64' ? (0, 1) : (0)) {
+        my $bridges = PVE::QemuServer::PCI::get_pci_bridges(
+            { nvme0 => undef, usbdisk0 => undef, emmc0 => undef },
+            $arch,
+            $q35,
+            0,
+            sub { return 0; },
+        );
+        ok(
+            !grep(/id=pci\.4,/, @$bridges),
+            "undefined template disks do not require bridge 4 ($arch, q35=$q35)",
+        );
+        for my $id ('nvme0', 'usbdisk0', 'emmc0') {
+            $bridges = PVE::QemuServer::PCI::get_pci_bridges(
+                { $id => $volume },
+                $arch,
+                $q35,
+                0,
+                sub { return 0; },
+            );
+            ok(
+                scalar(grep(/id=pci\.4,/, @$bridges)),
+                "configured $id requires bridge 4 ($arch, q35=$q35)",
+            );
+        }
+    }
+}
 
 ok(is_valid_drivename('usbdisk0'), 'first USB disk is valid');
 ok(is_valid_drivename('usbdisk7'), 'last USB disk is valid');
@@ -173,6 +218,20 @@ for my $machine ('pc-i440fx-9.2', 'pc-i440fx-11.1') {
         qr/removable=off,serial=custom,,serial/,
         "custom USB options and escaped serial on $machine",
     );
+    for my $serial ('0', '%30') {
+        like(
+            print_drivedevice_full(
+                {},
+                {},
+                8006,
+                parse_drive('usbdisk0', "$volume,serial=$serial"),
+                'x86_64',
+                $machine,
+            ),
+            qr/(?:^|,)serial=0(?:,|$)/,
+            "USB preserves a zero serial on $machine: $serial",
+        );
+    }
 }
 
 {
@@ -251,12 +310,19 @@ for my $machine ('pc-i440fx-9.2', 'pc-i440fx-11.1') {
     $qemu->mock(vm_devices_list => sub { return { 'usbdisk-xhci' => 1 }; });
     $qemu->mock(qemu_driveadd => sub { push @calls, 'backend-add'; });
     $qemu->mock(qemu_deviceadd => sub { push @calls, 'device-add'; });
+    my $added = 1;
+    $qemu->mock(
+        qemu_deviceaddverify => sub {
+            push @calls, 'verify-add';
+            die "USB device was not added\n" if !$added;
+        },
+    );
     $qemu->mock(qemu_findorcreatescsihw => sub { die "unexpected SCSI controller\n"; });
     PVE::QemuServer::vm_deviceplug({}, {}, 8006, 'usbdisk0', $drive, 'x86_64', 'pc-i440fx-11.1');
     is_deeply(
         \@calls,
-        ['backend-add', 'device-add'],
-        'USB plug adds a block backend and USB frontend',
+        ['backend-add', 'device-add', 'verify-add'],
+        'USB plug adds a block backend and confirms the USB frontend',
     );
     @calls = ();
     $qemu->mock(qemu_deviceadd => sub { die "device-add failed\n"; });
@@ -271,6 +337,20 @@ for my $machine ('pc-i440fx-9.2', 'pc-i440fx-11.1') {
         \@calls,
         ['backend-add', 'backend-delete'],
         'failed hotplug cleans up its block backend',
+    );
+    @calls = ();
+    $qemu->mock(qemu_deviceadd => sub { push @calls, 'device-add'; });
+    $added = 0;
+    eval {
+        PVE::QemuServer::vm_deviceplug(
+            {}, {}, 8006, 'usbdisk0', $drive, 'x86_64', 'pc-i440fx-11.1',
+        );
+    };
+    is($@, "USB device was not added\n", 'USB realization failure reaches the caller');
+    is_deeply(
+        \@calls,
+        ['backend-add', 'device-add', 'verify-add', 'backend-delete'],
+        'USB realization failure cleans up its block backend',
     );
     @calls = ();
     $qemu->mock(vm_devices_list => sub { return { usbdisk0 => 1, 'usbdisk-xhci' => 1 }; });

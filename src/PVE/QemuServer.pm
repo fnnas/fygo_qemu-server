@@ -86,6 +86,7 @@ use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::Monitor qw(mon_cmd qmp_cmd vm_qmp_peer);
 use PVE::QemuServer::Network;
+use PVE::QemuServer::NVMe;
 use PVE::QemuServer::OVMF;
 use PVE::QemuServer::PCI qw(print_pci_addr print_pcie_addr parse_hostpci get_pci_bridges);
 use PVE::QemuServer::PCI::Mdev;
@@ -3290,7 +3291,17 @@ sub config_to_command {
     }
 
     my $max_scsihw = PVE::QemuServer::DriveDevice::get_max_scsihw_index($conf);
-    if (my $bridges = get_pci_bridges($conf, $arch, $q35, $max_scsihw, $version_guard)) {
+    my $multifunction = {};
+    if ($arch eq 'aarch64' && !$is_template) {
+        # The NVMe SR-IOV switch shares bridge pci.1's root slot, on function one.
+        $multifunction->{1} = 1
+            if grep { $_->{owner}->{sriov_max_vfs} }
+            values PVE::QemuServer::NVMe::topology($conf)->%*;
+    }
+    if (
+        my $bridges =
+        get_pci_bridges($conf, $arch, $q35, $max_scsihw, $version_guard, $multifunction)
+    ) {
         push @$devices, $bridges->@*;
     }
 
@@ -3574,6 +3585,10 @@ sub config_to_command {
         push @$devices, '-iscsi', "initiator-name=$initiator";
     }
 
+    push @$devices, PVE::QemuServer::NVMe::controller_devices($conf, $vmid, $arch, $machine_type);
+    my $nvme_groups = PVE::QemuServer::NVMe::topology($conf);
+    my @automatic_fdp_devices;
+
     PVE::QemuConfig->foreach_volume(
         $conf,
         sub {
@@ -3644,6 +3659,14 @@ sub config_to_command {
 
             my $live_restore = $live_restore_backing->{$ds};
 
+            if (
+                $drive->{interface} eq 'nvme'
+                && ($drive->{zoned} || $drive->{ms} || $drive->{logical_block_size})
+            ) {
+                my $size = PVE::QemuServer::NVMe::image_size($storecfg, $drive);
+                PVE::QemuServer::NVMe::validate_size($drive, $size);
+            }
+
             if ($drive->{interface} eq 'emmc') {
                 PVE::QemuServer::EMMC::validate_image($storecfg, $drive);
                 if (!$is_template) {
@@ -3693,11 +3716,21 @@ sub config_to_command {
                 push @$devices, '-drive', $drive_cmd;
             }
 
-            push @$devices, '-device', print_drivedevice_full(
+            my $device = print_drivedevice_full(
                 $storecfg, $conf, $vmid, $drive, $arch, $machine_type,
             );
+            my $device_list = $devices;
+            if (!$is_template && $drive->{interface} eq 'nvme') {
+                my $owner = 'nvme' . ($drive->{'nvme-controller'} // $drive->{index});
+                # Reserve every explicitly selected host handle before QEMU
+                # assigns a shared controller handle to automatic namespaces.
+                $device_list = \@automatic_fdp_devices
+                    if $nvme_groups->{$owner}->{owner}->{fdp} && !defined($drive->{'fdp-ruhs'});
+            }
+            push @$device_list, '-device', $device;
         },
     );
+    push @$devices, @automatic_fdp_devices;
 
     my $nets_host_mtu =
         { map { split('=', $_) } PVE::Tools::split_list($options->{'nets-host-mtu'}) };
@@ -3947,7 +3980,10 @@ sub vm_deviceplug {
 
         my $devicefull =
             print_drivedevice_full($storecfg, $conf, $vmid, $device, $arch, $machine_type);
-        eval { qemu_deviceadd($vmid, $devicefull); };
+        eval {
+            qemu_deviceadd($vmid, $devicefull);
+            qemu_deviceaddverify($vmid, $deviceid) if $device->{interface} eq 'usbdisk';
+        };
         if (my $err = $@) {
             eval { qemu_drivedel($vmid, $deviceid); };
             warn $@ if $@;
@@ -5238,7 +5274,7 @@ sub vmconfig_update_disk {
                     || (
                         $drive->{interface} eq 'nvme' && grep {
                             safe_string_ne($drive->{$_}, $old_drive->{$_})
-                        } qw(serial max_ioqpairs msix_qsize mdts use-intel-id)
+                        } PVE::QemuServer::NVMe::option_names()
                     )
                     || (
                         $drive->{interface} eq 'usbdisk' && grep {
@@ -6604,6 +6640,7 @@ my $parse_backup_hints = sub {
     };
 
     my $virtdev_hash = {};
+    my $layout_drives = {};
     while (defined(my $line = <$fh>)) {
         if ($line =~ m/^\#qmdump\#map:(\S+):(\S+):(\S*):(\S*):$/) {
             my ($virtdev, $devname, $storeid, $format) = ($1, $2, $3, $4);
@@ -6625,6 +6662,11 @@ my $parse_backup_hints = sub {
             $check_storage->($storeid, $scfg); # permission and content type check
 
             $virtdev_hash->{$virtdev} = $devinfo->{$devname};
+        } elsif ($line =~ m/^((?:nvme|emmc)\d+):\s*(\S+)\s*$/) {
+            my ($id, $value) = ($1, $2);
+            my $drive = parse_drive($id, $value)
+                or die "unable to parse disk '$id' in backup configuration\n";
+            $layout_drives->{$id} = $drive if $drive->{interface} eq 'emmc' || $drive->{ms};
         } elsif ($line =~ m/^((?:ide|sata|scsi)\d+):\s*(.*)\s*$/) {
             my $virtdev = $1;
             my $drive = parse_drive($virtdev, $2);
@@ -6645,6 +6687,10 @@ my $parse_backup_hints = sub {
                 };
             }
         }
+    }
+
+    for my $id (keys %$layout_drives) {
+        $virtdev_hash->{$id}->{layout_drive} = $layout_drives->{$id} if $virtdev_hash->{$id};
     }
 
     return $virtdev_hash;
@@ -6686,6 +6732,15 @@ my $restore_allocate_devices = sub {
         $d->{volid} = $volid;
 
         PVE::Storage::activate_volumes($storecfg, [$volid]);
+
+        if (my $drive = $d->{layout_drive}) {
+            my $target_size = PVE::Storage::volume_size_info($storecfg, $volid, 10);
+            if ($drive->{interface} eq 'emmc') {
+                PVE::QemuServer::EMMC::validate_size($drive, $target_size);
+            } else {
+                PVE::QemuServer::NVMe::assert_copy_size($drive, $d->{size}, $target_size);
+            }
+        }
 
         $map->{$virtdev} = $volid;
     }
@@ -6796,6 +6851,16 @@ sub restore_merge_config {
     for my $key (keys $override_conf->%*) {
         $backup_conf->{$key} = $override_conf->{$key};
     }
+
+    # restore_update_config_line comments out excluded disks. Retain their
+    # controller settings when a backed-up namespace still depends on them.
+    my $excluded_nvme = {};
+    while ($backup_conf_raw =~ m/^#(nvme\d+):\s*(\S+)\s*$/mg) {
+        my ($id, $value) = ($1, $2);
+        my $drive = parse_drive($id, $value, 1);
+        $excluded_nvme->{$id} = $value if $drive && defined($drive->{backup}) && !$drive->{backup};
+    }
+    PVE::QemuServer::NVMe::restore_config($backup_conf, $excluded_nvme);
 
     return $backup_conf;
 }
@@ -7861,7 +7926,8 @@ sub restore_tar_archive {
 
     rmtree $tmpdir;
 
-    PVE::Tools::file_set_contents($conffile, $new_conf_raw);
+    my $new_conf = restore_merge_config($conffile, $new_conf_raw, $opts->{override_conf});
+    PVE::QemuConfig->write_config($vmid, $new_conf);
 
     PVE::Cluster::cfs_update(); # make sure we read new file
 
@@ -8083,7 +8149,11 @@ sub clone_disk {
                 $vmid, $drive, $storecfg, $src_storeid, $storeid, $use_drive_mirror,
             );
 
-            $size = PVE::Storage::volume_size_info($storecfg, $drive->{file}, 10);
+            if (($drive->{interface} // '') eq 'nvme' && $drive->{ms} && $snapname) {
+                $size = PVE::QemuServer::NVMe::snapshot_size($storecfg, $drive, $snapname);
+            } else {
+                $size = PVE::Storage::volume_size_info($storecfg, $drive->{file}, 10);
+            }
         }
         $source->{size} = $size;
         $newvolid = PVE::Storage::vdisk_alloc(
@@ -8100,6 +8170,13 @@ sub clone_disk {
         print("allocated target volume '$newvolid'\n");
 
         PVE::Storage::activate_volumes($storecfg, [$newvolid]);
+
+        if (($drive->{interface} // '') eq 'nvme' && $drive->{ms}) {
+            my $target_size = PVE::Storage::volume_size_info($storecfg, $newvolid, 10);
+            PVE::QemuServer::NVMe::assert_copy_size($drive, $size, $target_size);
+        } elsif (($drive->{interface} // '') eq 'emmc') {
+            PVE::QemuServer::EMMC::validate_image($storecfg, { %$drive, file => $newvolid });
+        }
 
         if (drive_is_cloudinit($drive)) {
             # when cloning multiple disks (e.g. during clone_vm) it might be the last disk
@@ -8255,6 +8332,7 @@ sub bootorder_from_legacy {
             my ($ds, $drive) = @_;
 
             return if $drive->{interface} eq 'emmc';
+            return if $drive->{interface} eq 'nvme' && $drive->{detached};
 
             if (drive_is_cdrom($drive, 1)) {
                 if ($bootindex_hash->{d}) {
@@ -8322,6 +8400,10 @@ sub device_bootorder {
     } elsif ($boot->{order}) {
         my $i = 100; # start at 100 to allow user to insert devices before us with -args
         for my $dev (PVE::Tools::split_list($boot->{order})) {
+            if ($dev =~ m/^nvme\d+$/ && $conf->{$dev}) {
+                my $drive = parse_drive($dev, $conf->{$dev});
+                next if $drive && $drive->{detached};
+            }
             $bootorder->{$dev} = $i++;
         }
     }

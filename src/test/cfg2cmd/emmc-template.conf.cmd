@@ -22,7 +22,6 @@
   -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pci.0,addr=0x1f' \
   -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
   -device 'piix3-usb-uhci,id=uhci,bus=pci.0,addr=0x1.0x2' \
-  -device 'qemu-xhci,id=usbdisk-xhci,p2=8,p3=8,bus=pci.4,addr=0x14' \
   -device 'usb-tablet,id=tablet,bus=uhci.0,port=1' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \

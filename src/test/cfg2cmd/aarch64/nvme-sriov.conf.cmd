@@ -1,0 +1,51 @@
+/usr/bin/qemu-system-aarch64 \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -object 'monitor-qmp,chardev=qmp,id=monitor-qmp' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -object 'monitor-qmp,chardev=qmp-event,id=monitor-qmp-event' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu max \
+  -m 512 \
+  -object '{"id":"throttle-drive-sata0","limits":{},"qom-type":"throttle-group"}' \
+  -object '{"id":"throttle-drive-nvme0","limits":{},"qom-type":"throttle-group"}' \
+  -object '{"id":"throttle-drive-nvme8","limits":{},"qom-type":"throttle-group"}' \
+  -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pcie.0,addr=0x1e,multifunction=on' \
+  -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pcie.0,addr=0x1f' \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'usb-ehci,id=ehci,bus=pcie.0,addr=0x1' \
+  -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
+  -device 'usb-kbd,id=keyboard,bus=ehci.0,port=2' \
+  -device 'virtio-gpu,id=vga,bus=pcie.0,addr=0x2' \
+  -chardev 'socket,path=/var/run/qemu-server/8006.qga,server=on,wait=off,id=qga0' \
+  -device 'virtio-serial,id=qga0,bus=pcie.0,addr=0x8' \
+  -device 'virtserialport,chardev=qga0,name=org.qemu.guest_agent.0' \
+  -device 'virtio-serial,id=spice,bus=pcie.0,addr=0x9' \
+  -chardev 'spicevmc,id=vdagent,name=vdagent' \
+  -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
+  -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -device 'pcie-root-port,id=nvme-root,bus=pcie.0,addr=0x1e.1,multifunction=on,chassis=199' \
+  -device 'x3130-upstream,id=nvme-switch,bus=nvme-root,addr=0x0' \
+  -device 'xio3130-downstream,id=nvme-port0,bus=nvme-switch,addr=0x0,chassis=200' \
+  -device 'xio3130-downstream,id=nvme-port8,bus=nvme-switch,addr=0x8,chassis=208' \
+  -device 'nvme-subsys,id=nvme-subsys-nvme0,nqn=vm8006-nvme0' \
+  -device 'nvme,id=nvme-ctrl-nvme0,subsys=nvme-subsys-nvme0,bus=nvme-port0,addr=0x0,serial=nvme0,use-intel-id=on,sriov_max_vfs=1,sriov_vq_flexible=2,sriov_vi_flexible=1' \
+  -device 'nvme-subsys,id=nvme-subsys-nvme8,nqn=vm8006-nvme8' \
+  -device 'nvme,id=nvme-ctrl-nvme8,subsys=nvme-subsys-nvme8,bus=nvme-port8,addr=0x0,serial=nvme8,use-intel-id=on,sriov_max_vfs=1,sriov_vq_flexible=2,sriov_vi_flexible=1' \
+  -device 'ahci,id=ahci0,multifunction=on,bus=pcie.0,addr=0x7' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"e443e31f78d55c7ed1542617a87c2ff","read-only":false},"node-name":"f443e31f78d55c7ed1542617a87c2ff","read-only":false},"node-name":"drive-sata0","read-only":false,"throttle-group":"throttle-drive-sata0"}' \
+  -device 'ide-hd,bus=ahci0.0,drive=drive-sata0,id=sata0,write-cache=on' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-1.raw","node-name":"ea9e549b799e8bc06d569c5406dbcd5","read-only":false},"node-name":"fa9e549b799e8bc06d569c5406dbcd5","read-only":false},"node-name":"drive-nvme0","read-only":false,"throttle-group":"throttle-drive-nvme0"}' \
+  -device 'nvme-ns,id=nvme0,drive=drive-nvme0,bus=nvme-ctrl-nvme0,nsid=1,uuid=16e0f93a-1d1b-59ec-ad78-40a0cc5a097e,write-cache=on' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-2.raw","node-name":"e586e1e4f86b661e1c61c84b7c96f46","read-only":false},"node-name":"f586e1e4f86b661e1c61c84b7c96f46","read-only":false},"node-name":"drive-nvme8","read-only":false,"throttle-group":"throttle-drive-nvme8"}' \
+  -device 'nvme-ns,id=nvme8,drive=drive-nvme8,bus=nvme-ctrl-nvme8,nsid=9,uuid=8c6f6488-e27a-5404-aeaa-cad036ed15b8,write-cache=on' \
+  -machine 'accel=tcg,type=virt+pve0'

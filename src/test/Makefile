@@ -34,14 +34,19 @@ test_restore_config: run_qemu_restore_config_tests.pl
 test_parse_config: run_parse_config_tests.pl
 	./run_parse_config_tests.pl
 
-test_nvme: run_nvme_tests.pl
+test_nvme: run_nvme_tests.pl run_nvme_feature_tests.pl run_nvme_lifecycle_tests.pl run_nvme_update_tests.pl run_nvme_pi_tests.pl
 	perl -I../ ./run_nvme_tests.pl
+	perl -I../ ./run_nvme_feature_tests.pl
+	perl -I../ ./run_nvme_lifecycle_tests.pl
+	perl -I../ ./run_nvme_update_tests.pl
+	perl -I../ ./run_nvme_pi_tests.pl
 
 test_usbdisk: run_usbdisk_tests.pl
 	perl -I../ ./run_usbdisk_tests.pl
 
-test_emmc: run_emmc_tests.pl
+test_emmc: run_emmc_tests.pl run_emmc_lifecycle_tests.pl
 	perl -I../ ./run_emmc_tests.pl
+	perl -I../ ./run_emmc_lifecycle_tests.pl
 
 .PHONY: clean
 clean:

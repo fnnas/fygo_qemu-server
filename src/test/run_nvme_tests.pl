@@ -47,10 +47,18 @@ for my $with_alloc (0, 1) {
 }
 
 for my $options (
-    'max_ioqpairs=0', 'max_ioqpairs=65536',
-    'msix_qsize=0', 'msix_qsize=2049',
-    'mdts=-1', 'mdts=0', 'mdts=10', 'mdts=256',
-    'media=cdrom', 'iothread=1', 'rerror=stop', 'werror=stop',
+    'max_ioqpairs=0',
+    'max_ioqpairs=65536',
+    'msix_qsize=0',
+    'msix_qsize=2049',
+    'mdts=-1',
+    'mdts=0',
+    'mdts=10',
+    'mdts=256',
+    'media=cdrom',
+    'iothread=1',
+    'rerror=stop',
+    'werror=stop',
 ) {
     ok(!parse_drive('nvme0', "$volume,$options"), "reject unsupported NVMe options: $options");
 }
@@ -91,6 +99,28 @@ like(
     'reject saving NVMe VM state',
 );
 
+for my $machine ('pc-i440fx-9.2', 'pc-i440fx-11.1') {
+    for my $options ('serial=0', 'serial=%30', 'subsystem=1,serial=0') {
+        my $value = "$volume,$options";
+        my $conf = { nvme0 => $value };
+        my @devices = PVE::QemuServer::NVMe::controller_devices($conf, 8006, 'x86_64', $machine);
+        push @devices,
+            PVE::QemuServer::DriveDevice::print_drivedevice_full(
+                {},
+                $conf,
+                8006,
+                parse_drive('nvme0', $value),
+                'x86_64',
+                $machine,
+            );
+        like(
+            join(' ', @devices),
+            qr/(?:^|,)serial=0(?:,|$)/,
+            "NVMe preserves a zero serial across controller layouts on $machine: $options",
+        );
+    }
+}
+
 my $qemu_mock = Test::MockModule->new('PVE::QemuServer');
 $qemu_mock->mock(vm_deviceplug => sub { die "unexpected device plug\n"; });
 $qemu_mock->mock(vm_deviceunplug => sub { die "unexpected device unplug\n"; });
@@ -99,7 +129,9 @@ $storage_mock->mock(activate_volumes => sub { die "unexpected volume activation\
 
 my $update = sub {
     my ($conf, $new_value) = @_;
-    PVE::QemuServer::vmconfig_update_disk({}, $conf, 1, 8006, 'nvme0', $new_value, 'x86_64', 'pc');
+    PVE::QemuServer::vmconfig_update_disk(
+        {}, $conf, 1, 8006, 'nvme0', $new_value, 'x86_64', 'pc',
+    );
 };
 eval { $update->({}, $volume); };
 is($@, "skip\n", 'new NVMe disk remains pending while the VM is running');

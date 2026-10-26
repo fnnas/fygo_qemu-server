@@ -15,6 +15,7 @@ use PVE::Tools;
 
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::EMMC;
+use PVE::QemuServer::NVMe;
 use PVE::QemuServer::Monitor qw(qsd_qmp_peer vm_qmp_peer);
 
 use base qw(Exporter);
@@ -349,36 +350,7 @@ my %wwn_fmt = (
     },
 );
 
-my %nvme_sub_fmt = (
-    max_ioqpairs => {
-        type => 'integer',
-        description => "Maximum number of I/O queue pairs.",
-        minimum => 1,
-        maximum => 65535,
-        optional => 1,
-    },
-    msix_qsize => {
-        type => 'integer',
-        description => "Number of MSI-X vectors supported by the device.",
-        minimum => 1,
-        maximum => 2048,
-        optional => 1,
-    },
-    mdts => {
-        type => 'integer',
-        description => "Maximum data transfer size as a power of two in units of the minimum"
-            . " memory page size.",
-        minimum => 1,
-        maximum => 9, # QEMU requires 2**mdts + 1 <= IOV_MAX (1024 on Linux).
-        optional => 1,
-    },
-    'use-intel-id' => {
-        type => 'boolean',
-        description => "Use the Intel PCI vendor and device IDs.",
-        default => 1,
-        optional => 1,
-    },
-);
+my %nvme_sub_fmt = PVE::QemuServer::NVMe::option_schema()->%*;
 
 my $add_throttle_desc = sub {
     my ($key, $type, $what, $unit, $longunit, $minimum) = @_;
@@ -1031,6 +1003,14 @@ sub parse_drive {
         }
     }
 
+    if ($interface eq 'nvme') {
+        eval { PVE::QemuServer::NVMe::validate_options($res); };
+        if (my $err = $@) {
+            warn $err;
+            return;
+        }
+    }
+
     my $error = 0;
     foreach my $opt (qw(bps bps_rd bps_wr)) {
         if (my $bps = defined(delete $res->{$opt})) {
@@ -1191,6 +1171,8 @@ sub is_volume_in_use {
 
     undef $skip_drive;
 
+    return 1 if $conf->{pending} && $scan_config->($conf->{pending});
+
     for my $snap (values %{ $conf->{snapshots} }) {
         return 1 if $scan_config->($snap);
     }
@@ -1204,6 +1186,7 @@ sub resolve_first_disk {
     foreach my $ds (@disks) {
         next if !$conf->{$ds};
         my $disk = parse_drive($ds, $conf->{$ds});
+        next if $disk && $disk->{interface} eq 'nvme' && $disk->{detached};
         next if drive_is_cdrom($disk) xor $cdrom;
         return $ds;
     }

@@ -165,7 +165,7 @@ sub get_usb_controllers {
         push @$devices, '-device', "nec-usb-xhci,id=xhci$pciaddr";
     }
 
-    if (grep { /^usbdisk\d+$/ } keys $conf->%*) {
+    if (grep { /^usbdisk\d+$/ && defined($conf->{$_}) } keys $conf->%*) {
         # Keep storage ports separate from host USB, SPICE redirection and input devices.
         my $ports = $PVE::QemuServer::Drive::MAX_USB_DISKS;
         $pciaddr = print_pci_addr('usbdisk-xhci', $arch);
