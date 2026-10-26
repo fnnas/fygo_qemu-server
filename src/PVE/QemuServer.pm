@@ -1184,6 +1184,8 @@ sub assert_clipboard_config {
 sub print_tabletdevice_full {
     my ($conf, $arch) = @_;
 
+    return 'usb-tablet,id=tablet,bus=xhci.0,port=2'
+        if PVE::QemuServer::Machine::machine_type_is_custom($conf);
     my $q35 = PVE::QemuServer::Machine::machine_type_is_q35($conf);
 
     # we use uhci for old VMs because tablet driver was buggy in older qemu
@@ -1339,6 +1341,10 @@ sub print_netdevice_full {
     }
 
     my $pciaddr = print_pci_addr("$netid", $arch);
+    if (PVE::QemuServer::Machine::machine_type_is_custom($conf) && $netid =~ m/^net([01])$/) {
+        my $function = $1 + 2;
+        $pciaddr = ",bus=pcie.00.1c.$function,addr=0x0";
+    }
     my $tmpstr = "$device,mac=$net->{macaddr},netdev=$netid$pciaddr,id=$netid";
     if ($net->{queues} && $net->{queues} > 1 && $net->{model} eq 'virtio') {
         # Consider we have N queues, the number of vectors needed is 2 * N + 2, i.e., one per in
@@ -3277,7 +3283,11 @@ sub config_to_command {
         push $machineFlags->@*, $ovmf_machine_flags->@*;
     }
 
-    if ($q35) { # tell QEMU to load q35 config early
+    my $custom_machine = PVE::QemuServer::Machine::machine_type_is_custom($conf);
+    if ($custom_machine) {
+        push $machineFlags->@*, 'sata=off', 'usb=off';
+        push @$devices, '-readconfig', '/usr/share/qemu-server/pve-azw-me-pro.cfg';
+    } elsif ($q35) { # tell QEMU to load q35 config early
         # we use different pcie-port hardware for qemu >= 4.0 for passthrough
         if (min_version($machine_version, 4, 0)) {
             push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35-4.0.cfg';
@@ -3649,7 +3659,7 @@ sub config_to_command {
                 $scsicontroller->{$controller} = 1;
             }
 
-            if ($drive->{interface} eq 'sata') {
+            if ($drive->{interface} eq 'sata' && !$custom_machine) {
                 my $controller = int($drive->{index} / $PVE::QemuServer::Drive::MAX_SATA_DISKS);
                 my $pciaddr = print_pci_addr("ahci$controller", $arch);
                 push @$devices, '-device', "ahci,id=ahci$controller,multifunction=on$pciaddr"
@@ -3769,7 +3779,9 @@ sub config_to_command {
         my $ivshmem = parse_property_string($ivshmem_fmt, $conf->{ivshmem});
 
         my $bus;
-        if ($q35) {
+        if ($custom_machine) {
+            $bus = ',bus=pcie.0,addr=0x2';
+        } elsif ($q35) {
             $bus = print_pcie_addr("ivshmem");
         } else {
             $bus = print_pci_addr("ivshmem", $arch);
@@ -3935,7 +3947,8 @@ sub vm_deviceplug {
     } elsif ($deviceid =~ m/^usbredirdev(\d+)$/) {
         my $id = $1;
         qemu_spice_usbredir_chardev_add($vmid, "usbredirchardev$id");
-        qemu_deviceadd($vmid, PVE::QemuServer::USB::print_spice_usbdevice($id, "xhci", $id + 1));
+        my $bus = PVE::QemuServer::USB::xhci_controller_id($conf);
+        qemu_deviceadd($vmid, PVE::QemuServer::USB::print_spice_usbdevice($id, $bus, $id + 1));
     } elsif ($deviceid =~ m/^usb(\d+)$/) {
         qemu_deviceadd(
             $vmid,
@@ -4027,7 +4040,11 @@ sub vm_deviceunplug {
     my $bootdisks = PVE::QemuServer::Drive::get_bootdisks($conf);
     die "can't unplug bootdisk '$deviceid'\n" if grep { $_ eq $deviceid } @$bootdisks;
 
-    if ($deviceid eq 'tablet' || $deviceid eq 'keyboard' || $deviceid eq 'xhci') {
+    if (
+        $deviceid eq 'tablet'
+        || $deviceid eq 'keyboard'
+        || $deviceid eq PVE::QemuServer::USB::xhci_controller_id($conf)
+    ) {
         qemu_devicedel($vmid, $deviceid);
     } elsif ($deviceid =~ m/^usbredirdev\d+$/) {
         qemu_devicedel($vmid, $deviceid);
@@ -4289,10 +4306,14 @@ sub qemu_usb_hotplug {
     # check if xhci controller is necessary and available
     my $added_xhci;
     my $devicelist = vm_devices_list($vmid);
+    my $controller_id = PVE::QemuServer::USB::xhci_controller_id($conf);
 
-    if (!$devicelist->{xhci}) {
+    if (!$devicelist->{$controller_id}) {
         my $pciaddr = print_pci_addr("xhci", $arch);
-        qemu_deviceadd($vmid, PVE::QemuServer::USB::print_qemu_xhci_controller($pciaddr));
+        qemu_deviceadd(
+            $vmid,
+            PVE::QemuServer::USB::print_qemu_xhci_controller($pciaddr, $controller_id),
+        );
         $added_xhci = 1;
     }
 
@@ -4300,7 +4321,7 @@ sub qemu_usb_hotplug {
     eval { vm_deviceplug($storecfg, $conf, $vmid, $deviceid, $device, $arch, $machine_type); };
     if (my $err = $@) {
         if ($added_xhci) {
-            eval { vm_deviceunplug($vmid, $conf, 'xhci'); };
+            eval { vm_deviceunplug($vmid, $conf, $controller_id); };
             warn "failed to unplug xhci controller - $@" if $@;
         }
         die $err;
@@ -4942,7 +4963,7 @@ sub vmconfig_hotplug_pending {
             last;
         }
         if (!$has_usb) {
-            vm_deviceunplug($vmid, $conf, 'xhci');
+            vm_deviceunplug($vmid, $conf, PVE::QemuServer::USB::xhci_controller_id($conf));
         }
     }
 

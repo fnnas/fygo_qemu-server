@@ -1,0 +1,28 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -mon 'chardev=qmp,mode=control' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -mon 'chardev=qmp-event,mode=control' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
+  -m 512 \
+  -global 'ICH9-LPC.disable_s3=1' \
+  -global 'ICH9-LPC.disable_s4=1' \
+  -readconfig /usr/share/qemu-server/pve-azw-me-pro.cfg \
+  -device 'usb-tablet,id=tablet,bus=xhci.0,port=2' \
+  -device 'pcie-root-port,id=ich9-pcie-port-16,bus=pcie.0,addr=0x13,chassis=115' \
+  -device 'vfio-pci,host=0000:07:10.0,id=hostpci15,bus=ich9-pcie-port-16,addr=0x0' \
+  -device 'VGA,id=vga,bus=pcie.0,addr=0x1' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -device 'ivshmem-plain,memdev=ivshmem,bus=pcie.0,addr=0x2,' \
+  -object 'memory-backend-file,id=ivshmem,share=on,mem-path=/dev/shm/pve-shm-8006,size=4M' \
+  -machine 'sata=off,usb=off,type=azw-me-pro-6+pve0'

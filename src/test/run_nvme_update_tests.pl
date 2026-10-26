@@ -1081,4 +1081,40 @@ is_deeply($conf, $raced_conf, 'locked boot validation preserves the concurrent d
     is($volume_size, $size, 'direct metadata refusal preserves the actual volume size');
 }
 
+for my $async (0, 1) {
+    for my $case (
+        [
+            { machine => 'q35', nvme3 => $owner_volume },
+            { machine => 'azw-me-pro-6' },
+            qr/supports NVMe controllers nvme0 through nvme2/,
+        ],
+        [
+            { machine => 'azw-me-pro-6', nvme0 => $owner_volume },
+            { nvme1 => "$child_volume,nvme-slot=0" },
+            qr/use the same custom machine slot 0/,
+        ],
+        [
+            { machine => 'azw-me-pro-6', map { ("sata$_" => $owner_volume) } 0 .. 5 },
+            { ide2 => 'none,media=cdrom' },
+            qr/only six shared SATA\/IDE ports/,
+        ],
+        [{ arch => 'aarch64' }, { machine => 'azw-me-pro-6' }, qr/only supported on x86_64/],
+    ) {
+        $reset->($cases[0]);
+        $running = 0;
+        $conf = { $case->[0]->%*, pending => {} };
+        my $before = dclone($conf);
+        my $params = { node => 'pve', vmid => 8006, $case->[1]->%* };
+        eval {
+            $async
+                ? PVE::API2::Qemu->update_vm_async($params)
+                : PVE::API2::Qemu->update_vm($params);
+        };
+        like($@, $case->[2], 'API rejects an invalid custom machine topology');
+        is_deeply($conf, $before, 'invalid custom topology leaves the configuration unchanged');
+        is_deeply(\@events, [], 'custom topology is validated before locks, storage or writes');
+        is($scheduled, 0, 'invalid custom topology does not schedule a worker');
+    }
+}
+
 done_testing();

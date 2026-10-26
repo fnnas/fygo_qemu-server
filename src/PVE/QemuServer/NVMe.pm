@@ -5,13 +5,14 @@ use warnings;
 
 use Digest::SHA qw(sha1_hex);
 use JSON qw(decode_json);
-use URI::Escape qw(uri_unescape);
+use URI::Escape qw(uri_escape uri_unescape);
 
 use PVE::AbstractConfig;
 use PVE::JSONSchema;
 use PVE::Storage;
 use PVE::Storage::Common;
 use PVE::QemuServer::Helpers;
+use PVE::QemuServer::Machine;
 use PVE::QemuServer::PCI qw(print_pci_addr);
 use PVE::Tools;
 
@@ -31,7 +32,9 @@ my @namespace_options = qw(
 );
 my @subsystem_options = qw(subsystem subnqn nvme-paths fdp fdp-nrg fdp-nruh fdp-runs);
 
-sub controller_option_names { return ('serial', @controller_options, @subsystem_options); }
+sub controller_option_names {
+    return ('serial', 'nvme-slot', @controller_options, @subsystem_options);
+}
 sub option_names { return ('nvme-controller', controller_option_names(), @namespace_options); }
 
 my %qemu_names = (
@@ -60,6 +63,12 @@ sub option_schema {
             0,
             15,
             'Disk index of the owning NVMe controller. Omit for a dedicated controller.',
+        ],
+        [
+            'nvme-slot',
+            0,
+            2,
+            'Fixed controller slot on a custom machine. Defaults to the controller disk index; ignored on other machines.',
         ],
         ['nvme-paths', 1, 8, 'Number of controller paths to the same subsystem.'],
         ['max_ioqpairs', 1, 65535, 'Maximum number of I/O queue pairs.'],
@@ -412,6 +421,7 @@ sub topology {
         die "NVMe FDP automatic placement requires an unused reclaim unit handle\n"
             if $automatic_placement && keys(%host_handles) >= ($owner->{'fdp-nruh'} // 16);
     }
+    PVE::QemuServer::Machine::assert_valid_custom_machine_config($conf, $groups);
     return $groups;
 }
 
@@ -468,7 +478,16 @@ sub restore_config {
             $new_owner->{$option} = $group->{owner}->{$option}
                 if defined($group->{owner}->{$option});
         }
-        $new_owner->{serial} //= $owner_id;
+        if (PVE::QemuServer::Machine::machine_type_is_custom($conf)) {
+            # Keep the controller's physical slot without renaming namespace
+            # disk IDs, which also name their backup/live-restore streams.
+            $new_owner->{'nvme-slot'} //= $group->{owner}->{index};
+            $new_owner->{serial} //= uri_escape(
+                PVE::QemuServer::Machine::custom_nvme_serial($conf, $new_owner->{'nvme-slot'}),
+            );
+        } else {
+            $new_owner->{serial} //= $owner_id;
+        }
         # Keep explicit namespace IDs and identifiers even with one survivor.
         $new_owner->{subsystem} = 1;
         $conf->{$new_owner_id} = PVE::QemuServer::Drive::print_drive($new_owner);
@@ -593,6 +612,7 @@ sub controller_devices {
     my $groups = topology($conf);
     my @devices;
     my %root_ports;
+    my $custom = PVE::QemuServer::Machine::machine_type_is_custom($conf);
     return @devices if $conf->{template};
     for my $owner_id (
         sort { $groups->{$a}->{owner}->{index} <=> $groups->{$b}->{owner}->{index} }
@@ -604,11 +624,11 @@ sub controller_devices {
         next if !$group->{explicit};
         if ($owner->{sriov_max_vfs}) {
             die "NVMe SR-IOV requires Q35 or aarch64\n"
-                if $arch ne 'aarch64' && $machine_type !~ m/q35/;
+                if $arch ne 'aarch64' && $machine_type !~ m/q35/ && !$custom;
             # Separate PCIe buses keep VF routing IDs clear of other devices.
             # Q35 needs function zero to anchor sparse multifunction root slots.
-            $root_ports{ 8 * int($owner->{index} / 8) } = 1 if $arch ne 'aarch64';
-            $root_ports{ $owner->{index} } = 1;
+            $root_ports{ 8 * int($owner->{index} / 8) } = 1 if $arch ne 'aarch64' && !$custom;
+            $root_ports{ $owner->{index} } = 1 if !$custom;
         }
     }
     if ($arch eq 'aarch64' && %root_ports) {
@@ -648,14 +668,22 @@ sub controller_devices {
         }
         push @devices, '-device', $device;
         my $paths = $owner->{'nvme-paths'} // 1;
+        my $serial = $owner->{serial} // ($custom ? undef : $owner_id);
+        # Controllers in one subsystem must share a serial. The machine's
+        # per-function defaults differ, so use the first path's topology serial.
+        my $slot = $owner->{'nvme-slot'} // $owner->{index};
+        $serial //= PVE::QemuServer::Machine::custom_nvme_serial($conf, $slot)
+            if $paths > 1;
         for my $path (0 .. $paths - 1) {
             my $id = "nvme-ctrl-$owner_id" . ($path ? "-path$path" : '');
             my $pciaddr = print_pci_addr($owner_id, $arch);
+            $pciaddr = PVE::QemuServer::Machine::custom_nvme_pci_address($conf, $slot) // $pciaddr;
             $pciaddr .= sprintf('.%x', $path) if $path;
             $pciaddr .= ',multifunction=on' if !$path && $paths > 1;
-            $pciaddr = ",bus=nvme-port$owner->{index},addr=0x0" if $owner->{sriov_max_vfs};
-            my $serial = $owner->{serial} // $owner_id;
-            $device = "nvme,id=$id,subsys=$subsys$pciaddr" . _qemu_option('serial', $serial);
+            $pciaddr = ",bus=nvme-port$owner->{index},addr=0x0"
+                if $owner->{sriov_max_vfs} && !$custom;
+            $device = "nvme,id=$id,subsys=$subsys$pciaddr";
+            $device .= _qemu_option('serial', $serial) if defined($serial);
             $device .= controller_options($owner);
             push @devices, '-device', $device;
         }

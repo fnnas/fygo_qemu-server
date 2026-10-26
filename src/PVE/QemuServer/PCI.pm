@@ -650,7 +650,17 @@ sub print_hostpci_devices {
 
         $legacy_igd = 1 if $d->{'legacy-igd'};
 
-        if (my $pcie = $d->{pcie}) {
+        if ($d->{pcie} && PVE::QemuServer::Machine::machine_type_is_custom($conf)) {
+            # Keep the platform's eight fixed ports. Additional passthrough
+            # ports use separate root slots, including sparse hostpci indices.
+            my $addr = sprintf('0x%x', 4 + $i);
+            my $chassis = 100 + $i;
+            push @$devices, '-device',
+                "pcie-root-port,id=ich9-pcie-port-"
+                . ($i + 1)
+                . ",bus=pcie.0,addr=$addr,chassis=$chassis";
+            $pciaddr = print_pcie_addr($id);
+        } elsif (my $pcie = $d->{pcie}) {
             # win7 wants to have the pcie devices directly on the pcie bus
             # instead of in the root port
             if ($winversion == 7) {

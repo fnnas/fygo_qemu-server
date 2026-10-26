@@ -180,7 +180,9 @@ sub print_drivedevice_full {
         $device_type = 'cd' if $conf->{template};
 
         $device = "ide-$device_type";
-        if ($drive->{interface} eq 'ide') {
+        if (my $address = PVE::QemuServer::Machine::custom_sata_address($conf, $drive_id)) {
+            $device .= $address;
+        } elsif ($drive->{interface} eq 'ide') {
             $device .= ",bus=ide.$controller,unit=$unit";
         } else {
             $device .= ",bus=ahci$controller.$unit";
@@ -205,6 +207,10 @@ sub print_drivedevice_full {
             return PVE::QemuServer::NVMe::namespace_device($conf, $vmid, $drive, $arch);
         }
         my $pciaddr = print_pci_addr($drive_id, $arch);
+        $pciaddr = PVE::QemuServer::Machine::custom_nvme_pci_address(
+            $conf,
+            $drive->{'nvme-slot'} // $drive->{index},
+        ) // $pciaddr;
         $device = "nvme,id=$drive_id,drive=drive-$drive_id$pciaddr";
         $device .= PVE::QemuServer::NVMe::controller_options($drive);
     } elsif ($drive->{interface} eq 'usbdisk') {
@@ -220,7 +226,13 @@ sub print_drivedevice_full {
     if (defined(my $serial = $drive->{serial})) {
         $serial = _escape_qemu_arg_value(URI::Escape::uri_unescape($serial));
         $device .= ",serial=$serial";
-    } elsif ($drive->{interface} eq 'nvme' || $drive->{interface} eq 'usbdisk') {
+    } elsif (
+        (
+            $drive->{interface} eq 'nvme'
+            && !PVE::QemuServer::Machine::machine_type_is_custom($conf)
+        )
+        || $drive->{interface} eq 'usbdisk'
+    ) {
         $device .= ",serial=$drive_id";
     }
 

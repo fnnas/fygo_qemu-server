@@ -128,8 +128,9 @@ sub get_usb_controllers {
 
     my $ostype = $conf->{ostype};
 
-    my $use_qemu_xhci =
-        min_version($machine_version, 7, 1)
+    my $custom = PVE::QemuServer::Machine::machine_type_is_custom($conf);
+    my $use_qemu_xhci = $custom
+        || min_version($machine_version, 7, 1)
         && defined($ostype)
         && ($ostype eq 'l26' || windows_version($ostype) > 7);
     my $is_q35 = PVE::QemuServer::Machine::machine_type_is_q35($conf);
@@ -160,7 +161,7 @@ sub get_usb_controllers {
 
     $pciaddr = print_pci_addr("xhci", $arch);
     if ($use_qemu_xhci && $any_usb) {
-        push @$devices, '-device', print_qemu_xhci_controller($pciaddr);
+        push @$devices, '-device', print_qemu_xhci_controller($pciaddr, xhci_controller_id($conf));
     } elsif ($use_usb3) {
         push @$devices, '-device', "nec-usb-xhci,id=xhci$pciaddr";
     }
@@ -181,8 +182,9 @@ sub get_usb_devices {
     my $devices = [];
 
     my $ostype = $conf->{ostype};
-    my $use_qemu_xhci =
-        min_version($machine_version, 7, 1)
+    my $custom = PVE::QemuServer::Machine::machine_type_is_custom($conf);
+    my $use_qemu_xhci = $custom
+        || min_version($machine_version, 7, 1)
         && defined($ostype)
         && ($ostype eq 'l26' || windows_version($ostype) > 7);
 
@@ -199,6 +201,7 @@ sub get_usb_devices {
             # usb redir support for spice
             my $bus = 'ehci';
             $bus = 'xhci' if ($d->{usb3} && $features->{spice_usb3}) || $use_qemu_xhci;
+            $bus = xhci_controller_id($conf) if $custom;
 
             push @$devices, '-chardev', "spicevmc,id=usbredirchardev$i,name=usbredir";
             push @$devices, '-device', print_spice_usbdevice($i, $bus, $port);
@@ -212,9 +215,15 @@ sub get_usb_devices {
     return @$devices;
 }
 
+sub xhci_controller_id {
+    my ($conf) = @_;
+    return PVE::QemuServer::Machine::machine_type_is_custom($conf) ? 'pve-xhci' : 'xhci';
+}
+
 sub print_qemu_xhci_controller {
-    my ($pciaddr) = @_;
-    return "qemu-xhci,p2=15,p3=15,id=xhci$pciaddr";
+    my ($pciaddr, $id) = @_;
+    $id //= 'xhci';
+    return "qemu-xhci,p2=15,p3=15,id=$id$pciaddr";
 }
 
 sub print_spice_usbdevice {
@@ -234,7 +243,8 @@ sub print_usbdevice_full {
 
     # if it is a usb3 device or with newer qemu, attach it to the xhci controller, else omit the bus option
     if ($device->{usb3} || defined($port)) {
-        $usbdevice .= ",bus=xhci.0";
+        my $bus = xhci_controller_id($conf);
+        $usbdevice .= ",bus=$bus.0";
         $usbdevice .= ",port=$port" if defined($port);
     }
 

@@ -7,6 +7,115 @@ use PVE::QemuServer::Helpers;
 use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::Monitor;
 use PVE::JSONSchema qw(get_standard_option parse_property_string print_property_string);
+use PVE::Tools ();
+
+# These are concrete, versioned platforms, not aliases for the newest Q35.
+my $custom_machines = {
+    'azw-me-pro-6' => { name => 'azw-me-pro', base => 'q35', version => '11.0' },
+};
+
+sub custom_machine_info {
+    my ($type) = @_;
+    return if !defined($type);
+    $type =~ s/\+pve0$//;
+    return $custom_machines->{$type};
+}
+
+sub machine_type_is_custom {
+    my ($conf) = @_;
+    my $machine = parse_machine($conf->{machine});
+    return custom_machine_info($machine->{type}) ? 1 : 0;
+}
+
+sub installed_custom_machines {
+    my ($arch) = @_;
+    return [] if $arch ne 'x86_64';
+
+    my @machines;
+    PVE::Tools::run_command(
+        [PVE::QemuServer::Helpers::get_command_for_arch($arch), '-machine', 'help'],
+        timeout => 10,
+        outfunc => sub {
+            my ($id) = $_[0] =~ m/^(\S+)\s/;
+            return if !defined($id) || !$custom_machines->{$id};
+            push @machines,
+                { id => $id, type => 'custom', version => $custom_machines->{$id}->{name} };
+        },
+    );
+    return \@machines;
+}
+
+my sub custom_nvme_port {
+    my ($conf, $index) = @_;
+    return if !machine_type_is_custom($conf);
+    my @ports = (
+        ['pcie.00.1c.0', '00:1c.0-01:00.0'],
+        ['pcie.00.1c.6', '00:1c.6-04:00.0'],
+        ['pcie.00.1d.0', '00:1d.0-05:00.0'],
+    );
+    die
+        "azw-me-pro-6 supports NVMe controllers nvme0 through nvme2; use nvme-controller to share a controller\n"
+        if $index < 0 || $index > $#ports;
+    return $ports[$index];
+}
+
+sub custom_nvme_pci_address {
+    my $port = custom_nvme_port(@_) or return;
+    return ",bus=$port->[0],addr=0x0";
+}
+
+sub custom_nvme_serial {
+    my $port = custom_nvme_port(@_) or return;
+    return $port->[1];
+}
+
+sub custom_sata_address {
+    my ($conf, $id) = @_;
+    return if !machine_type_is_custom($conf);
+
+    my $port;
+    if ($id =~ m/^sata([0-5])$/) {
+        $port = $1;
+    } else {
+        # SATA indices name physical ports. Legacy IDE/CD-ROM frontends share
+        # the remaining ports, including empty CD-ROM drives.
+        my @free = grep { !defined($conf->{"sata$_"}) } 0 .. 5;
+        for my $index (0 .. 3) {
+            my $ide = "ide$index";
+            next if !defined($conf->{$ide}) && $ide ne $id;
+            my $candidate = shift @free;
+            die "azw-me-pro-6 has only six shared SATA/IDE ports; no free port for $ide\n"
+                if !defined($candidate);
+            if ($ide eq $id) {
+                $port = $candidate;
+                last;
+            }
+        }
+    }
+    die "invalid azw-me-pro-6 SATA/IDE device '$id'\n" if !defined($port);
+    return ',bus=asm' . int($port / 2) . '.' . ($port % 2) . ',unit=0';
+}
+
+sub assert_valid_custom_machine_config {
+    my ($conf, $nvme_groups) = @_;
+    return if !machine_type_is_custom($conf);
+
+    die "custom machine is only supported on x86_64\n"
+        if PVE::QemuServer::Helpers::get_vm_arch($conf) ne 'x86_64';
+
+    my %slots;
+    for my $id (sort keys %$nvme_groups) {
+        my $owner = $nvme_groups->{$id}->{owner};
+        my $slot = $owner->{'nvme-slot'} // $owner->{index};
+        custom_nvme_port($conf, $slot);
+        die "NVMe controllers '$slots{$slot}' and '$id' use the same custom machine slot $slot\n"
+            if $slots{$slot};
+        $slots{$slot} = $id;
+    }
+    for my $id (sort grep { /^(?:ide[0-3]|sata[0-5])$/ && defined($conf->{$_}) } keys %$conf) {
+        custom_sata_address($conf, $id);
+    }
+}
 
 # The PVE machine versions allow rolling out (incompatibel) changes to the hardware layout and/or
 # the QEMU command of a VM without requiring a newer QEMU upstream machine version.
@@ -56,9 +165,14 @@ my $machine_fmt = {
     type => {
         default_key => 1,
         description => "Specifies the QEMU machine type.",
+        verbose_description => "Specifies the QEMU machine type. The x86_64-only custom machine"
+            . " 'azw-me-pro-6' requires a matching custom QEMU build and uses a fixed Q35 11.0 platform."
+            . " It provides NVMe controller slots nvme0 through nvme2 and six shared SATA/IDE ports."
+            . " Higher NVMe disk indices can share one of these controllers as namespaces."
+            . " The nvme-slot disk property preserves controller placement during partial restores.",
         type => 'string',
         pattern =>
-            '(pc|pc(-i440fx)?-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|q35|pc-q35-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|virt(?:-\d+(\.\d+)+)?(\+pve\d+)?)',
+            '(pc|pc(-i440fx)?-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|q35|pc-q35-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|virt(?:-\d+(\.\d+)+)?(\+pve\d+)?|azw-me-pro-6(?:\+pve0)?)',
         maxLength => 40,
         format_description => 'machine type',
         optional => 1,
@@ -136,7 +250,7 @@ sub default_machine_for_arch {
 sub assert_valid_machine_property {
     my ($machine_conf) = @_;
     if ($machine_conf->{viommu} && $machine_conf->{viommu} eq "intel") {
-        my $q35 = $machine_conf->{type} && ($machine_conf->{type} =~ m/q35/) ? 1 : 0;
+        my $q35 = machine_type_is_q35({ machine => print_machine($machine_conf) });
         die "to use Intel vIOMMU please set the machine type to q35\n" if !$q35;
 
         die "Intel vIOMMU supports only 39 or 48 bits as address width\n"
@@ -164,6 +278,7 @@ my sub machine_base_type {
 
     die "unable to determine machine base type - no value\n" if !$machine_type;
 
+    return custom_machine_info($machine_type)->{base} if custom_machine_info($machine_type);
     return 'q35' if $machine_type =~ m/q35/;
     return 'i440fx' if $machine_type =~ m/^pc/;
     return 'virt' if $machine_type =~ m/^virt/;
@@ -254,6 +369,10 @@ the string did not contain any version or if parsing failed.
 my sub extract_version_parts {
     my ($machine_type) = @_;
 
+    if (my $custom = custom_machine_info($machine_type)) {
+        my ($major, $minor) = split(/\./, $custom->{version});
+        return ($major, $minor, 0);
+    }
     if ($machine_type =~
         m/^(?:pc(?:-i440fx|-q35)?|virt)-(\d+)\.(\d+)(?:\.(\d+))?(?:\+pve(\d+))?(?:\.pxe)?/
     ) {
@@ -411,6 +530,9 @@ sub get_vm_machine {
     my $machine_conf = parse_machine($conf->{machine});
     my $machine = $forcemachine || $machine_conf->{type};
 
+    die "custom machine '$machine' is only supported on x86_64\n"
+        if custom_machine_info($machine)
+        && PVE::QemuServer::Helpers::get_vm_arch($conf) ne 'x86_64';
     if (!$machine || $machine =~ m/^(?:pc|q35|virt)$/) {
         my $kvmversion = PVE::QemuServer::Helpers::kvm_user_version();
         my $arch = PVE::QemuServer::Helpers::get_vm_arch($conf);
@@ -459,6 +581,9 @@ sub check_and_pin_machine_string {
 
     my $machine_conf = parse_machine($machine_string);
     my $machine = $machine_conf->{type};
+    die "custom machine '$machine' is only supported on x86_64\n"
+        if custom_machine_info($machine)
+        && ($arch // PVE::QemuServer::Helpers::get_host_arch()) ne 'x86_64';
     if (!$machine || $machine =~ m/^(?:pc|q35|virt)$/) {
         # always pin Windows' machine version on create, they get confused too easily
         if (PVE::QemuServer::Helpers::windows_version($ostype)) {
@@ -483,7 +608,7 @@ sub get_power_state_flags {
         return; # virt machines are normally ARM64 ones which have no concept of s3/s4
     }
 
-    my $object = ($machine =~ m/q35/) ? "ICH9-LPC" : "PIIX4_PM";
+    my $object = machine_base_type($machine) eq 'q35' ? "ICH9-LPC" : "PIIX4_PM";
 
     my $default = 1;
     if ($version_guard->(9, 2, 1)) {

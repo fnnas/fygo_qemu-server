@@ -1,0 +1,30 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -mon 'chardev=qmp,mode=control' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -mon 'chardev=qmp-event,mode=control' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
+  -m 512 \
+  -object '{"id":"throttle-drive-nvme2","limits":{},"qom-type":"throttle-group"}' \
+  -global 'ICH9-LPC.disable_s3=1' \
+  -global 'ICH9-LPC.disable_s4=1' \
+  -readconfig /usr/share/qemu-server/pve-azw-me-pro.cfg \
+  -device 'pci-bridge,id=pci.4,chassis_nr=4,bus=pci.1,addr=0x1c' \
+  -device 'usb-tablet,id=tablet,bus=xhci.0,port=2' \
+  -device 'VGA,id=vga,bus=pcie.0,addr=0x1' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -device 'nvme-subsys,id=nvme-subsys-nvme2,nqn=vm8006-nvme2' \
+  -device 'nvme,id=nvme-ctrl-nvme2,subsys=nvme-subsys-nvme2,bus=pcie.00.1d.0,addr=0x0,use-intel-id=on,sriov_max_vfs=2,sriov_vq_flexible=4,sriov_vi_flexible=2' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"e1f74d4b88efeae65a2455b937d4d1a","read-only":false},"node-name":"f1f74d4b88efeae65a2455b937d4d1a","read-only":false},"node-name":"drive-nvme2","read-only":false,"throttle-group":"throttle-drive-nvme2"}' \
+  -device 'nvme-ns,id=nvme2,drive=drive-nvme2,bus=nvme-ctrl-nvme2,nsid=3,uuid=1cb45cc5-e0f3-5dd2-ac64-ba4e002b2f00,write-cache=on' \
+  -machine 'sata=off,usb=off,type=azw-me-pro-6+pve0'
