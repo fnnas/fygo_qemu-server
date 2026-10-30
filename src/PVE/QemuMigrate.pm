@@ -33,6 +33,7 @@ use PVE::QemuServer::BlockJob;
 use PVE::QemuServer::CPUConfig;
 use PVE::QemuServer::Drive qw(checked_volume_format);
 use PVE::QemuServer::EMMC;
+use PVE::QemuServer::SDCard;
 use PVE::QemuServer::Helpers qw(min_version);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Monitor qw(mon_cmd vm_qmp_peer);
@@ -741,7 +742,7 @@ sub sync_offline_local_volumes {
                 my ($key, $drive) = @_;
                 push $layout_drives->{ $drive->{file} }->@*, $drive
                     if ($drive->{interface} eq 'nvme' && $drive->{ms})
-                    || $drive->{interface} eq 'emmc';
+                    || $drive->{interface} =~ m/^(?:emmc|sdcard)$/;
             },
         );
     }
@@ -836,6 +837,9 @@ sub sync_offline_local_volumes {
                     # Preserved snapshots may have their own size and layout.
                     # An unchanged import cannot introduce a capacity mismatch.
                     PVE::QemuServer::EMMC::validate_size($drive, $target_size)
+                        if $target_size != $local_volumes->{$volid}->{size};
+                } elsif ($drive->{interface} eq 'sdcard') {
+                    PVE::QemuServer::SDCard::validate_size($drive, $target_size)
                         if $target_size != $local_volumes->{$volid}->{size};
                 } else {
                     PVE::QemuServer::NVMe::assert_copy_size(

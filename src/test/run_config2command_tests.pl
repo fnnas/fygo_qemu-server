@@ -355,6 +355,10 @@ $storage_module->mock(
 # Actual storage size queries and invalid layouts are covered by their unit tests.
 my $emmc_module = Test::MockModule->new('PVE::QemuServer::EMMC');
 $emmc_module->mock(image_size => sub { return $_[1]->{size}; });
+my $sdcard_module = Test::MockModule->new('PVE::QemuServer::SDCard');
+$sdcard_module->mock(image_size => sub { return $_[1]->{size}; });
+# Device capability probes have separate tests; fixtures model a capable QEMU.
+$sdcard_module->mock(assert_qemu_support => sub { });
 my $nvme_module = Test::MockModule->new('PVE::QemuServer::NVMe');
 $nvme_module->mock(image_size => sub { return $_[1]->{size}; });
 

@@ -955,6 +955,8 @@ is_deeply($conf, $raced_conf, 'locked boot validation preserves the concurrent d
         ['emmc0', 'boot-partition-size=4194304,rpmb-partition-size=2097152', 0],
         ['nvme0', '', 1],
         ['emmc0', '', 1],
+        ['sdcard0', 'sd-spec-version=3', 0],
+        ['sdcard0', '', 1],
     ) {
         my ($reference_disk, $options, $live) = @$case;
         for my $section ('current', 'pending') {
@@ -986,7 +988,7 @@ is_deeply($conf, $raced_conf, 'locked boot validation preserves the concurrent d
                     eval { $resize->('scsi0', '+1M'); };
                     like(
                         $@,
-                        qr/volume.*referenced by another NVMe or eMMC disk/,
+                        qr/volume.*referenced by another NVMe, eMMC or SD card disk/,
                         'resizing through another slot cannot bypass layout or running-device restrictions',
                     );
                     is(

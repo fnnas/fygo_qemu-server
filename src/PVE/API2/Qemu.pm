@@ -35,6 +35,7 @@ use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CPUConfig;
 use PVE::QemuServer::Drive qw(checked_volume_format checked_parse_volname);
 use PVE::QemuServer::EMMC;
+use PVE::QemuServer::SDCard;
 use PVE::QemuServer::NVMe;
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
@@ -535,6 +536,8 @@ my sub create_disks : prototype($$$$$$$$$$$) {
 
             PVE::QemuServer::EMMC::validate_size($disk, $size * 1024)
                 if $disk->{interface} eq 'emmc' && !$disk->{'import-from'};
+            PVE::QemuServer::SDCard::validate_size($disk, $size * 1024)
+                if $disk->{interface} eq 'sdcard' && !$disk->{'import-from'};
             PVE::QemuServer::NVMe::validate_size($disk, $size * 1024)
                 if $disk->{interface} eq 'nvme' && !$disk->{'import-from'};
 
@@ -717,6 +720,12 @@ my sub create_disks : prototype($$$$$$$$$$$) {
                 $disk->{size} = $size;
                 $res->{$ds} = PVE::QemuServer::print_drive($disk);
             }
+            if ($disk->{interface} eq 'sdcard') {
+                my $size = PVE::QemuServer::SDCard::image_size($storecfg, $disk);
+                PVE::QemuServer::SDCard::validate_size($disk, $size);
+                $disk->{size} = $size;
+                $res->{$ds} = PVE::QemuServer::print_drive($disk);
+            }
             if (
                 $disk->{interface} eq 'nvme'
                 && ($disk->{zoned} || $disk->{ms} || $disk->{logical_block_size})
@@ -763,6 +772,8 @@ my sub create_disks : prototype($$$$$$$$$$$) {
             $disk->{size} = $size;
 
             PVE::QemuServer::EMMC::validate_size($disk, $size) if $disk->{interface} eq 'emmc';
+            PVE::QemuServer::SDCard::validate_size($disk, $size)
+                if $disk->{interface} eq 'sdcard';
             PVE::QemuServer::NVMe::validate_size($disk, $size) if $disk->{interface} eq 'nvme';
 
             $res->{$ds} = PVE::QemuServer::print_drive($disk);
@@ -5291,6 +5302,7 @@ __PACKAGE__->register_method({
             # renaming it or removing its source configuration entry.
             if (
                 $drive->{interface} eq 'emmc'
+                || $drive->{interface} eq 'sdcard'
                 || ($drive->{interface} eq 'nvme'
                     && ($drive->{zoned} || $drive->{ms} || $drive->{logical_block_size}))
             ) {
@@ -5299,6 +5311,8 @@ __PACKAGE__->register_method({
                 die "volume $source_volid does not exist\n" if !$size;
                 PVE::QemuServer::EMMC::validate_size($drive, $size)
                     if $drive->{interface} eq 'emmc';
+                PVE::QemuServer::SDCard::validate_size($drive, $size)
+                    if $drive->{interface} eq 'sdcard';
                 PVE::QemuServer::NVMe::validate_size($drive, $size)
                     if $drive->{interface} eq 'nvme';
             }
@@ -6315,7 +6329,8 @@ __PACKAGE__->register_method({
                 my $source = $section eq 'current' ? $conf : ($conf->{pending} // {});
                 my $target = $section eq 'current' ? $layout_refs : $layout_refs->{pending};
                 for my $key (
-                    grep { /^(?:nvme|emmc)\d+$/ && defined($source->{$_}) } keys %$source
+                    grep { /^(?:nvme|emmc|sdcard)\d+$/ && defined($source->{$_}) }
+                    keys %$source
                 ) {
                     next if $section eq 'current' && $key eq $disk;
                     my $other = PVE::QemuServer::parse_drive($key, $source->{$key}, 1);
@@ -6329,12 +6344,14 @@ __PACKAGE__->register_method({
             }
             die
                 "Cannot resize volume '$volid' through '$disk' while it is referenced by another"
-                . " NVMe or eMMC disk - use that disk's resize operation or detach/revert the reference first\n"
+                . " NVMe, eMMC or SD card disk - use that disk's resize operation or detach/revert the reference first\n"
                 if $has_layout_refs
                 && PVE::QemuServer::Drive::is_volume_in_use($storecfg, $layout_refs, undef, $volid);
 
             PVE::QemuServer::EMMC::validate_size($drive, $newsize)
                 if $drive->{interface} eq 'emmc';
+            PVE::QemuServer::SDCard::validate_size($drive, $newsize)
+                if $drive->{interface} eq 'sdcard';
             if ($drive->{interface} eq 'nvme') {
                 PVE::QemuServer::NVMe::assert_resize_allowed($drive);
                 PVE::QemuServer::NVMe::validate_size($drive, $newsize);
@@ -6353,6 +6370,9 @@ __PACKAGE__->register_method({
             if ($drive->{interface} eq 'emmc') {
                 $newsize = PVE::QemuServer::EMMC::image_size($storecfg, $drive);
                 PVE::QemuServer::EMMC::validate_size($drive, $newsize);
+            } elsif ($drive->{interface} eq 'sdcard') {
+                $newsize = PVE::QemuServer::SDCard::image_size($storecfg, $drive);
+                PVE::QemuServer::SDCard::validate_size($drive, $newsize);
             }
 
             $drive->{size} = $newsize;
