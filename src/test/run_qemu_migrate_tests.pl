@@ -543,7 +543,12 @@ my $tests = [
             'with-local-disks' => 1,
             targetstorage => 'local-dir',
         },
-        expected_calls => $default_expected_calls_online,
+        expected_calls => {
+            %$default_expected_calls_online,
+            'spice-ticket' => 1,
+            'spice-client-migrate-info' => 1,
+            'spice-migration-complete' => 1,
+        },
         expected => {
             source_volids => {},
             target_volids => {
@@ -574,7 +579,12 @@ my $tests = [
             online => 1,
             'with-local-disks' => 1,
         },
-        expected_calls => $default_expected_calls_online,
+        expected_calls => {
+            %$default_expected_calls_online,
+            'spice-ticket' => 1,
+            'spice-client-migrate-info' => 1,
+            'spice-migration-complete' => 1,
+        },
         expected => {
             source_volids => {},
             target_volids => {

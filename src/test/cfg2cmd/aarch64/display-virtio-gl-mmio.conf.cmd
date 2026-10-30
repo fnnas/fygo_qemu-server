@@ -1,0 +1,30 @@
+/usr/bin/qemu-system-aarch64 \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -mon 'chardev=qmp,mode=control' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -mon 'chardev=qmp-event,mode=control' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -display 'egl-headless,gl=core,rendernode=/dev/dri/renderD128' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu max \
+  -m 512 \
+  -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pcie.0,addr=0x1e' \
+  -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pcie.0,addr=0x1f' \
+  -device 'usb-ehci,id=ehci,bus=pcie.0,addr=0x1' \
+  -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
+  -device 'usb-kbd,id=keyboard,bus=ehci.0,port=2' \
+  -device 'virtio-gpu-gl-device,id=vga' \
+  -device 'virtio-serial,id=spice,bus=pcie.0,addr=0x9' \
+  -chardev 'spicevmc,id=vdagent,name=vdagent' \
+  -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
+  -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -machine 'accel=tcg,type=virt+pve0'

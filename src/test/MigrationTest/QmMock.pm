@@ -59,6 +59,14 @@ my sub mocked_mon_cmd {
             qemu => { major => '11', minor => '0', micro => '0' },
             package => 'pve-qemu-kvm_11.0.0-4',
         };
+    } elsif ($command eq 'set_password') {
+        die "unexpected SPICE password\n"
+            if ($params{protocol} // '') ne 'spice'
+            || ($params{password} // '') ne 'mock-spice-ticket';
+        file_set_contents("${RUN_DIR_PATH}/spice_target_ticket", $params{password});
+        return;
+    } elsif ($command eq 'expire_password') {
+        return;
     }
     die "mon_cmd (mocked) - implement me: $command";
 }
@@ -140,7 +148,9 @@ $MigrationTest::Shared::storage_module->mock(
 
 $MigrationTest::Shared::qemu_server_module->mock(
     config_to_command => sub {
-        return ['mocked_kvm_command'];
+        my (undef, undef, $conf) = @_;
+        my $spice_port = PVE::QemuServer::vga_conf_uses_spice($conf) ? 61000 : undef;
+        return (['mocked_kvm_command'], $spice_port, {}, $conf);
     },
     mon_cmd => \&mocked_mon_cmd,
     nodename => sub {

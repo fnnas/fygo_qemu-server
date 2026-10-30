@@ -365,7 +365,21 @@ sub qemu_memdevices_list {
 }
 
 sub config {
-    my ($conf, $vmid, $sockets, $cores, $hotplug, $virtiofs_enabled, $cmd, $machine_flags) = @_;
+    my (
+        $conf,
+        $vmid,
+        $sockets,
+        $cores,
+        $hotplug,
+        $virtiofs_enabled,
+        $cmd,
+        $machine_flags,
+        $vhost_gpu,
+    ) = @_;
+
+    die "Memory hotplug does not work in combination with vhost-user graphics.\n"
+        if $hotplug && $vhost_gpu;
+    my $shared_prefix = $virtiofs_enabled ? 'virtiofs-mem' : $vhost_gpu ? 'vgpu-mem' : undef;
 
     my $memory = get_current_memory($conf->{memory});
     my $static_memory = 0;
@@ -412,7 +426,7 @@ sub config {
             my $numa_memory = $numa->{memory};
             $numa_totalmemory += $numa_memory;
 
-            my $memdev = $virtiofs_enabled ? "virtiofs-mem$i" : "ram-node$i";
+            my $memdev = $shared_prefix ? "$shared_prefix$i" : "ram-node$i";
             my $mem_object = print_mem_object($conf, $memdev, $numa_memory);
 
             # cpus
@@ -461,17 +475,17 @@ sub config {
                 my $cpus = ($cores * $i);
                 $cpus .= "-" . ($cpus + $cores - 1) if $cores > 1;
 
-                my $memdev = $virtiofs_enabled ? "virtiofs-mem$i" : "ram-node$i";
+                my $memdev = $shared_prefix ? "$shared_prefix$i" : "ram-node$i";
                 my $mem_object = print_mem_object($conf, $memdev, $numa_memory);
                 push @$cmd, '-object', $mem_object;
                 push @$cmd, '-numa', "node,nodeid=$i,cpus=$cpus,memdev=$memdev";
             }
         }
-    } elsif ($virtiofs_enabled) {
+    } elsif ($shared_prefix) {
         # kvm: '-machine memory-backend' and '-numa memdev' properties are mutually exclusive
         push @$cmd, '-object',
-            'memory-backend-memfd,id=virtiofs-mem' . ",size=$conf->{memory}M,share=on";
-        push @$machine_flags, 'memory-backend=virtiofs-mem';
+            "memory-backend-memfd,id=$shared_prefix,size=${static_memory}M,share=on";
+        push @$machine_flags, "memory-backend=$shared_prefix";
     }
 
     if ($hotplug) {
@@ -504,7 +518,7 @@ sub print_mem_object {
         my $path = hugepages_mount_path($hugepages_size);
 
         return "memory-backend-file,id=$id,size=${size}M,mem-path=$path,share=on,prealloc=yes";
-    } elsif ($id =~ m/^virtiofs-mem/) {
+    } elsif ($id =~ m/^(?:virtiofs|vgpu)-mem/) {
         return "memory-backend-memfd,id=$id,size=${size}M,share=on";
     } else {
         return "memory-backend-ram,id=$id,size=${size}M";

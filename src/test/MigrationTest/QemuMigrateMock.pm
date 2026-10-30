@@ -33,6 +33,7 @@ my $test_opts = $migrate_params->{opts};
 my $current_log = '';
 
 my $vm_stop_executed = 0;
+my $spice_queries = 0;
 
 # mocked modules
 
@@ -92,7 +93,20 @@ $qemu_migrate_module->mock(
     mon_cmd => sub {
         my ($vmid, $command, %params) = @_;
 
-        if ($command eq 'nbd-server-start') {
+        if ($command eq 'query-spice') {
+            my $expected = $spice_queries++ ? 'spice-migration-complete' : 'spice-ticket';
+            delete $expected_calls->{$expected};
+            return { ticket => 'mock-spice-ticket', migrated => 1 };
+        } elsif ($command eq 'client_migrate_info') {
+            die "unexpected SPICE migration parameters\n"
+                if ($params{protocol} // '') ne 'spice'
+                || ($params{hostname} // '') ne 'mock-spice-proxy-ticket'
+                || ($params{'tls-port'} // 0) != 61000;
+            die "target did not receive the SPICE ticket\n"
+                if file_get_contents("${RUN_DIR_PATH}/spice_target_ticket") ne 'mock-spice-ticket';
+            delete $expected_calls->{'spice-client-migrate-info'};
+            return;
+        } elsif ($command eq 'nbd-server-start') {
             return;
         } elsif ($command eq 'block-dirty-bitmap-add') {
             my $drive = $params{node};
@@ -118,6 +132,15 @@ $qemu_migrate_module->mock(
     switch_replication_job_target => sub {
         delete $expected_calls->{switch_replication_job_target};
     },
+);
+
+my $rpcenv_module = Test::MockModule->new('PVE::RPCEnvironment');
+$rpcenv_module->mock(get => sub { return bless {}, 'PVE::RPCEnvironment'; });
+$rpcenv_module->mock(get_user => sub { return 'root@pam'; });
+my $access_control_module = Test::MockModule->new('PVE::AccessControl');
+$access_control_module->mock(
+    assemble_spice_ticket => sub { return ('mock-ticket', 'mock-spice-proxy-ticket'); },
+    read_x509_subject_spice => sub { return '/CN=mock-target'; },
 );
 
 $MigrationTest::Shared::qemu_server_module->mock(
@@ -200,6 +223,7 @@ $qemu_server_cpuconfig_module->mock(
 
 my $qemu_server_helpers_module = Test::MockModule->new("PVE::QemuServer::Helpers");
 $qemu_server_helpers_module->mock(
+    get_node_pvecfg_version => sub { return undef; },
     vm_running_locally => sub {
         return $vm_status->{running} && !$vm_stop_executed;
     },

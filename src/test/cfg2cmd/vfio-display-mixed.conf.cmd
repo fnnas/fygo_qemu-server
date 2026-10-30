@@ -1,0 +1,33 @@
+/usr/bin/kvm \
+  -id 8006 \
+  -name vm8006 \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -mon 'chardev=qmp,mode=control' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -mon 'chardev=qmp-event,mode=control' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -object '{"id":"throttle-drive-efidisk0","limits":{},"qom-type":"throttle-group"}' \
+  -blockdev '{"driver":"raw","file":{"driver":"file","filename":"/usr/share/pve-edk2-firmware//OVMF_CODE.fd"},"node-name":"pflash0","read-only":true}' \
+  -blockdev '{"detect-zeroes":"on","discard":"ignore","driver":"throttle","file":{"cache":{"direct":false,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":false,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"file","filename":"/run/qemu-server/efidisk/8006-ovmf.fd","node-name":"e5ecb54a3863bf2f22d662c53f49ac4","read-only":false},"node-name":"f5ecb54a3863bf2f22d662c53f49ac4","read-only":false,"size":131072},"node-name":"drive-efidisk0","read-only":false,"throttle-group":"throttle-drive-efidisk0"}' \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -display 'egl-headless,gl=core,rendernode=/dev/dri/renderD128' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
+  -m 512 \
+  -global 'ICH9-LPC.disable_s3=1' \
+  -global 'ICH9-LPC.disable_s4=1' \
+  -readconfig /usr/share/qemu-server/pve-q35-4.0.cfg \
+  -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
+  -device 'vfio-pci-nohotplug,sysfsdev=/sys/bus/mdev/devices/00000000-0000-0000-0000-000000008006,id=hostpci0,bus=ich9-pcie-port-1,addr=0x0,display=on,ramfb=on,x-igd-opregion=on' \
+  -device 'vfio-pci,host=0000:07:10.0,id=hostpci1,bus=ich9-pcie-port-2,addr=0x0' \
+  -device 'virtio-serial,id=spice,bus=pci.0,addr=0x9' \
+  -chardev 'spicevmc,id=vdagent,name=vdagent' \
+  -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
+  -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -machine 'pflash0=pflash0,pflash1=drive-efidisk0,type=q35+pve0'

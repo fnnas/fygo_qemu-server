@@ -3675,11 +3675,9 @@ __PACKAGE__->register_method({
 
         $status->{ha} = PVE::HA::Config::get_service_status("vm:$param->{vmid}");
 
+        $status->{spice} = 1 if PVE::QemuServer::vga_conf_uses_spice($conf);
         if ($conf->{vga}) {
             my $vga = PVE::QemuServer::parse_vga($conf->{vga});
-            my $spice = defined($vga->{type}) && $vga->{type} =~ /^virtio/;
-            $spice ||= PVE::QemuServer::vga_conf_has_spice($conf->{vga});
-            $status->{spice} = 1 if $spice;
             $status->{clipboard} = $vga->{clipboard};
         }
         $status->{agent} = 1 if PVE::QemuServer::Agent::get_qga_key($conf, 'enabled');
