@@ -531,6 +531,17 @@ my $usbdiskdesc = {
 PVE::JSONSchema::register_standard_option("pve-qm-usbdisk", $usbdiskdesc);
 
 my %emmc_sub_fmt = (
+    cid => {
+        type => 'string',
+        pattern => '^[0-9a-fA-F]{32}$',
+        format_description => 'hex-cid',
+        optional => 1,
+        description =>
+            'eMMC card identification register (16 bytes encoded as 32 hex characters).'
+            . ' Omit to use the QEMU default. Requires QEMU support for emmc.cid.'
+            . ' Linux on SDHCI reports the last byte as 00 because the controller omits the CRC byte.'
+            . ' Changes require a VM shutdown.',
+    },
     'boot-partition-size' => {
         type => 'integer',
         minimum => 0,

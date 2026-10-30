@@ -88,7 +88,7 @@ sub print_drivedevice_full {
             return "virtio-blk-pci,id=$drive_id,drive=drive-$drive_id$pciaddr";
         }
         my $device = "emmc,id=$drive_id,drive=drive-$drive_id,bus=pci.4/sdhci-$drive_id/sd-bus";
-        for my $option (qw(boot-partition-size rpmb-partition-size boot-config auth-key)) {
+        for my $option (qw(boot-partition-size rpmb-partition-size boot-config auth-key cid)) {
             $device .= ",$option=$drive->{$option}" if defined($drive->{$option});
         }
         # eMMC has no bootindex, serial, write-cache or block error action properties.

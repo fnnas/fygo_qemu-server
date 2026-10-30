@@ -3680,7 +3680,7 @@ sub config_to_command {
             if ($drive->{interface} eq 'emmc') {
                 PVE::QemuServer::EMMC::validate_image($storecfg, $drive);
                 if (!$is_template) {
-                    PVE::QemuServer::EMMC::assert_auth_key_support($drive, $arch);
+                    PVE::QemuServer::EMMC::assert_qemu_support($drive, $arch);
                     my $pciaddr = print_pci_addr("sdhci-$ds", $arch);
                     # QEMU lacks Auto CMD23. SDHCI v3 makes Linux use it with ADMA,
                     # leaving eMMC in sendingdata state after multi-block reads.
@@ -5305,7 +5305,7 @@ sub vmconfig_update_disk {
                     || (
                         $drive->{interface} eq 'emmc' && grep {
                             safe_string_ne($drive->{$_}, $old_drive->{$_})
-                        } qw(boot-partition-size rpmb-partition-size boot-config auth-key)
+                        } qw(boot-partition-size rpmb-partition-size boot-config auth-key cid)
                     )
                 ) {
                     die "skip\n";

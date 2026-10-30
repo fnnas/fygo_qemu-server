@@ -14,7 +14,8 @@ use PVE::QemuServer::Drive qw(parse_drive);
 
 my $volume = 'local:8006/vm-8006-disk-0.raw';
 my $target_volume = 'target:8007/vm-8007-disk-0.raw';
-my $options = 'boot-partition-size=4194304,rpmb-partition-size=2097152';
+my $options =
+    'boot-partition-size=4194304,cid=15010043494431323310012345672900,rpmb-partition-size=2097152';
 my $source_size = 26 * 1024**2;
 my @events;
 my $cluster = Test::MockModule->new('PVE::Cluster');

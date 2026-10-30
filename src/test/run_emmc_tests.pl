@@ -19,7 +19,8 @@ my $cluster = Test::MockModule->new('PVE::Cluster');
 $cluster->mock(cfs_read_file => sub { return {}; });
 my $volume = 'local:8006/vm-8006-disk-0.raw';
 my $key = '0123456789abcdef' x 4;
-my $options = 'boot-config=74,boot-partition-size=1048576,rpmb-partition-size=2097152';
+my $cid = '15010043494431323310012345672900';
+my $options = "boot-config=74,boot-partition-size=1048576,cid=$cid,rpmb-partition-size=2097152";
 my $value = "$volume,auth-key=$key,$options";
 
 ok(is_valid_drivename('emmc0'), 'first eMMC slot is valid');
@@ -48,7 +49,9 @@ for my $with_alloc (0, 1) {
 
 {
     my $padded_key = '00000aBc' x 8;
+    my $padded_cid = '00000aBc' x 4;
     for my $case (
+        ["cid=$padded_cid", "cid=$padded_cid", 0],
         ['boot-partition-size=04194304', 'boot-partition-size=4194304', 2 * 4194304],
         [
             "auth-key=$padded_key,rpmb-partition-size=00131072",
@@ -81,7 +84,7 @@ for my $with_alloc (0, 1) {
         );
         my %expected = map { split('=', $_, 2) } split(',', $canonical);
         my $device = 'emmc,id=emmc0,drive=drive-emmc0,bus=pci.4/sdhci-emmc0/sd-bus';
-        for my $option (qw(boot-partition-size rpmb-partition-size boot-config auth-key)) {
+        for my $option (qw(boot-partition-size rpmb-partition-size boot-config auth-key cid)) {
             $device .= ",$option=$expected{$option}" if defined($expected{$option});
         }
         is(
@@ -139,9 +142,27 @@ for my $bad (
     'boot-config=128',
     'auth-key=abcd',
     "auth-key=$key",
+    'cid=',
+    'cid=' . ('a' x 31),
+    'cid=' . ('a' x 33),
+    'cid=' . ('g' x 32),
+    'cid=0x' . ('a' x 30),
+    "cid=$cid\n",
 ) {
     local $SIG{__WARN__} = sub { };
     ok(!parse_drive('emmc0', "$volume,$bad"), "reject invalid or unsupported options: $bad");
+}
+for my $bad ('', 'a' x 31, 'a' x 33, 'g' x 32, "$cid\n") {
+    eval { PVE::QemuServer::EMMC::validate_options({ cid => $bad }); };
+    like(
+        $@,
+        qr/cid must contain exactly 32 hexadecimal characters/,
+        'internal CID validation is strict',
+    );
+}
+for my $id ('scsi0', 'nvme0', 'usbdisk0') {
+    local $SIG{__WARN__} = sub { };
+    ok(!parse_drive($id, "$volume,cid=$cid"), "CID is restricted to eMMC: $id");
 }
 for my $file ('none', 'cdrom', 'local:vm-8006-cloudinit') {
     ok(!parse_drive('emmc0', $file), "eMMC requires a disk image: $file");
@@ -252,28 +273,57 @@ for my $size (
 }
 {
     my $tools = Test::MockModule->new('PVE::Tools');
-    my $supports = 0;
+    my %supported;
+    my $probe_count = 0;
+    my $probe_error = 0;
     $tools->mock(
         run_command => sub {
             my ($cmd, %opts) = @_;
+            $probe_count++;
             is_deeply(
                 [@$cmd[1 .. $#$cmd]],
                 ['-device', 'emmc,help'],
-                'capability probe contains no key',
+                'capability probe contains no configured values',
             );
-            $opts{outfunc}->('  auth-key=<str>') if $supports;
+            $opts{outfunc}->("  $_=<str>") for sort keys %supported;
+            die "probe failed\n" if $probe_error;
         },
     );
-    eval { PVE::QemuServer::EMMC::assert_auth_key_support($drive, 'x86_64'); };
+    PVE::QemuServer::EMMC::assert_qemu_support({}, 'x86_64');
+    is($probe_count, 0, 'default eMMC requires no optional QEMU capability probe');
+    eval { PVE::QemuServer::EMMC::assert_qemu_support($drive, 'x86_64'); };
     like(
         $@,
         qr/requires a QEMU build with the emmc.auth-key property/,
         'old QEMU gets an actionable error',
     );
     unlike($@, qr/$key/, 'unsupported-property error contains no authentication key');
-    $supports = 1;
-    eval { PVE::QemuServer::EMMC::assert_auth_key_support($drive, 'aarch64'); };
-    is($@, '', 'accept a QEMU build advertising auth-key on the guest architecture');
+    eval { PVE::QemuServer::EMMC::assert_qemu_support({ cid => $cid }, 'x86_64'); };
+    like(
+        $@,
+        qr/requires a QEMU build with the emmc.cid property/,
+        'CID gets an actionable capability error',
+    );
+    $supported{'auth-key'} = 1;
+    eval { PVE::QemuServer::EMMC::assert_qemu_support($drive, 'x86_64'); };
+    like(
+        $@,
+        qr/requires a QEMU build with the emmc.cid property/,
+        'auth-key support does not imply CID support',
+    );
+    $supported{cid} = 1;
+
+    for my $arch ('x86_64', 'aarch64') {
+        eval { PVE::QemuServer::EMMC::assert_qemu_support($drive, $arch); };
+        is($@, '', "accept a QEMU build advertising both properties: $arch");
+    }
+    $probe_error = 1;
+    eval { PVE::QemuServer::EMMC::assert_qemu_support({ cid => $cid }, 'x86_64'); };
+    like(
+        $@,
+        qr/requires a QEMU build with the emmc.cid property/,
+        'failed probe does not accept partial output',
+    );
 }
 
 my $filename = '/etc/pve/qemu-server/8006.conf';
@@ -349,6 +399,7 @@ for my $machine ('pc-i440fx-9.2', 'pc-q35-11.1') {
     );
     like($cmd, qr/boot-config=74/, 'native EXT_CSD boot configuration is passed');
     like($cmd, qr/auth-key=$key/, 'preset RPMB key is passed');
+    like($cmd, qr/cid=$cid(?:,|$)/, 'custom CID is passed without changing its bytes');
     unlike(
         $cmd,
         qr/bootindex|serial|write-cache|rerror|werror/,
@@ -409,6 +460,8 @@ is(
         ['rpmb-partition-size', 4194304],
         ['boot-config', 75],
         ['auth-key', 'cd' x 32],
+        ['cid', '00aAbBcC' x 4],
+        ['cid', undef],
     ) {
         my $changed = { %$drive, $option->[0] => $option->[1] };
         eval {

@@ -13,6 +13,9 @@ use PVE::QemuServer::Helpers;
 sub validate_options {
     my ($drive) = @_;
 
+    die "eMMC cid must contain exactly 32 hexadecimal characters\n"
+        if defined($drive->{cid}) && $drive->{cid} !~ m/\A[0-9a-fA-F]{32}\z/;
+
     # Property strings use decimal integers; QEMU treats a leading zero as octal.
     for my $option (qw(boot-partition-size rpmb-partition-size boot-config)) {
         $drive->{$option} = 0 + $drive->{$option} if defined($drive->{$option});
@@ -89,24 +92,32 @@ sub validate_image {
 }
 
 # Probe the actual emulator, since downstream builds can backport this property.
-# Never include the authentication key in commands used for probing or errors.
-sub assert_auth_key_support {
+# Never include configured values in commands used for probing or errors.
+sub assert_qemu_support {
     my ($drive, $arch) = @_;
 
-    return if !defined($drive->{'auth-key'});
+    my @properties = grep { defined($drive->{$_}) } qw(auth-key cid);
+    return if !@properties;
     my $binary = PVE::QemuServer::Helpers::get_command_for_arch($arch);
-    my $supported = 0;
+    my %supported;
     eval {
         PVE::Tools::run_command(
             [$binary, '-device', 'emmc,help'],
             timeout => 10,
-            outfunc => sub { $supported = 1 if $_[0] =~ m/^\s*auth-key\s*=/; },
+            outfunc => sub {
+                $supported{$1} = 1 if $_[0] =~ m/^\s*(auth-key|cid)\s*=/;
+            },
             errfunc => sub { },
         );
     };
-    die "eMMC auth-key requires a QEMU build with the emmc.auth-key property; upgrade QEMU"
-        . " or remove auth-key (guest-programmed keys do not survive a cold restart)\n"
-        if !$supported;
+    %supported = () if $@;
+    for my $property (@properties) {
+        next if $supported{$property};
+        my $hint =
+            $property eq 'auth-key' ? ' (guest-programmed keys do not survive a cold restart)' : '';
+        die "eMMC $property requires a QEMU build with the emmc.$property property; upgrade QEMU"
+            . " or remove $property$hint\n";
+    }
 }
 
 1;
