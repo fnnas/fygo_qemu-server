@@ -37,7 +37,9 @@ sub emmc_rpmb_state_blockers {
     return grep {
         my $drive = parse_drive($_, $conf->{$_});
         $drive && $drive->{'rpmb-partition-size'};
-    } sort grep { /^emmc\d+$/ } keys $conf->%*;
+        } sort grep {
+            /^emmc\d+$/
+        } keys $conf->%*;
 }
 
 sub check_non_migratable_resources {
@@ -45,6 +47,12 @@ sub check_non_migratable_resources {
 
     my @blockers = ();
     if ($state) {
+        require PVE::QemuServer;
+        my $vga = PVE::QemuServer::parse_vga($conf->{vga});
+        push @blockers, 'vga'
+            if ($vga->{type} // '') eq 'ati-vga'
+            || PVE::QemuServer::vga_is_vhost_user($vga)
+            || ($vga->{type} // '') =~ m/^virtio-(?:gl|gpu-gl-(?:pci|device))$/;
         push @blockers, "amd-sev" if $conf->{"amd-sev"};
         push @blockers, "intel-tdx" if $conf->{"intel-tdx"};
         push @blockers, "virtiofs" if PVE::QemuServer::Virtiofs::virtiofs_enabled($conf);
@@ -63,6 +71,8 @@ sub check_non_migratable_resources {
 # test if VM uses local resources (to prevent migration)
 sub check_local_resources {
     my ($conf, $state, $noerr) = @_;
+
+    require PVE::QemuServer;
 
     my @loc_res = ();
     my $mapped_res = {};
@@ -98,6 +108,8 @@ sub check_local_resources {
     push @loc_res, "hostpci" if $conf->{hostpci}; # old syntax
 
     push @loc_res, "ivshmem" if $conf->{ivshmem};
+    push @loc_res, 'vga'
+        if !$state && PVE::QemuServer::vga_is_vhost_user(PVE::QemuServer::parse_vga($conf->{vga}));
 
     foreach my $k (keys %$conf) {
         if ($k =~ m/^usb\d+$/) {

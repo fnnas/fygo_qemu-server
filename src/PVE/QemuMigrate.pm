@@ -1296,7 +1296,7 @@ sub phase2 {
     my $nbd_protocol_version = 1;
 
     my $spice_ticket;
-    if (PVE::QemuServer::vga_conf_has_spice($conf->{vga})) {
+    if (PVE::QemuServer::vga_uses_spice(PVE::QemuServer::parse_vga($conf->{vga}))) {
         my $res = mon_cmd($vmid, 'query-spice');
         $spice_ticket = $res->{ticket};
     }
@@ -1465,7 +1465,10 @@ sub phase2 {
     eval { mon_cmd($vmid, "migrate-set-parameters", %{$qemu_migrate_params}); };
     $self->log('info', "migrate-set-parameters error: $@") if $@;
 
-    if (PVE::QemuServer::vga_conf_has_spice($conf->{vga}) && !$self->{opts}->{remote}) {
+    if (
+        PVE::QemuServer::vga_uses_spice(PVE::QemuServer::parse_vga($conf->{vga}))
+        && !$self->{opts}->{remote}
+    ) {
         my $rpcenv = PVE::RPCEnvironment::get();
         my $authuser = $rpcenv->get_user();
 
@@ -1920,7 +1923,10 @@ sub phase3_cleanup {
 
     eval {
         my $timer = 0;
-        if (PVE::QemuServer::vga_conf_has_spice($conf->{vga}) && $self->{running}) {
+        if (
+            PVE::QemuServer::vga_uses_spice(PVE::QemuServer::parse_vga($conf->{vga}))
+            && $self->{running}
+        ) {
             $self->log('info', "Waiting for spice server migration");
             while (1) {
                 my $res = mon_cmd($vmid, 'query-spice');

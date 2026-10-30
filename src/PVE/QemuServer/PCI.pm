@@ -78,6 +78,20 @@ EODESCR
         optional => 1,
         default => 0,
     },
+    display => {
+        type => 'boolean',
+        optional => 1,
+        default => 0,
+        description => 'Expose this graphics device through VNC/SPICE with VGA type mdev.'
+            . ' Requires a VFIO display-capable GPU and a compatible host driver.',
+    },
+    ramfb => {
+        type => 'boolean',
+        optional => 1,
+        default => 0,
+        description => 'Provide a firmware framebuffer for a device with display enabled.'
+            . ' Requires UEFI and a full shutdown/start; device hotplug is unavailable.',
+    },
     'legacy-igd' => {
         type => 'boolean',
         description =>
@@ -479,6 +493,9 @@ sub parse_hostpci {
         die "Either 'host' or 'mapping' must be set.\n";
     }
 
+    die "ramfb requires display=1\n" if $res->{ramfb} && !$res->{display};
+    die "display is not compatible with legacy-igd\n" if $res->{display} && $res->{'legacy-igd'};
+
     $res->{ids} = [];
     for my $alternative ($alternatives->@*) {
         my $ids = [];
@@ -487,6 +504,10 @@ sub parse_hostpci {
             die "no PCI device found for '$id'\n" if !scalar($devs->@*);
             push $ids->@*, @$devs;
         }
+        # Validate every alternative, including mdev parents selected later at VM start.
+        # Only function zero of this assignment receives the display parameters.
+        die "display requires a PCI graphics device as the first function\n"
+            if $res->{display} && ($ids->[0]->{class} // '') !~ m/^0x03[0-9a-f]{4}$/i;
         if (scalar($ids->@*) > 1) {
             $res->{'has-multifunction'} = 1;
             die "cannot use mediated device with multifunction device\n"
@@ -644,6 +665,17 @@ sub print_hostpci_devices {
     my $pciaddr;
     my $pci_devices = choose_hostpci_devices(parse_hostpci_devices($conf), $vmid, $dry_run);
 
+    my $vfio_display = ($vga->{type} // '') eq 'mdev';
+    if ($vfio_display) {
+        my @display_devices = grep { $_->{display} } values $pci_devices->%*;
+        die "VGA type mdev requires a graphics hostpci device with display=1\n"
+            if !@display_devices;
+        my $ramfb_count = grep { $_->{ramfb} } @display_devices;
+        die "only one VFIO device may enable ramfb\n" if $ramfb_count > 1;
+        die "ramfb requires UEFI firmware (bios=ovmf)\n"
+            if $ramfb_count && ($conf->{bios} // '') ne 'ovmf' && $arch ne 'aarch64';
+    }
+
     for (my $i = 0; $i < $MAX_HOSTPCI_DEVICES; $i++) {
         my $id = "hostpci$i";
         my $d = $pci_devices->{$id};
@@ -698,7 +730,8 @@ sub print_hostpci_devices {
 
         for (my $j = 0; $j < $num_devices; $j++) {
             my $pcidevice = $d->{ids}->[$j];
-            my $devicestr = "vfio-pci";
+            my $display = $vfio_display && $d->{display} && $j == 0;
+            my $devicestr = $display && $d->{ramfb} ? 'vfio-pci-nohotplug' : 'vfio-pci';
 
             if ($sysfspath) {
                 $devicestr .= ",sysfsdev=$sysfspath";
@@ -714,6 +747,13 @@ sub print_hostpci_devices {
             $devicestr .= ",id=${id}${mf_addr}${pciaddr}${mf_addr}";
 
             if ($j == 0) {
+                if ($display) {
+                    $devicestr .= ',display=on';
+                    $devicestr .= ',ramfb=on' if $d->{ramfb};
+                    $devicestr .= ',x-igd-opregion=on'
+                        if ($d->{mdev} // '') =~ m/^i915-/
+                        && ($pcidevice->{vendor} // '') =~ m/^(?:0x)?8086$/i;
+                }
                 $devicestr .= ',rombar=0' if defined($d->{rombar}) && !$d->{rombar};
                 $devicestr .= "$xvga";
                 $devicestr .= ",multifunction=on" if $multifunction;

@@ -3677,8 +3677,7 @@ __PACKAGE__->register_method({
 
         if ($conf->{vga}) {
             my $vga = PVE::QemuServer::parse_vga($conf->{vga});
-            my $spice = defined($vga->{type}) && $vga->{type} =~ /^virtio/;
-            $spice ||= PVE::QemuServer::vga_conf_has_spice($conf->{vga});
+            my $spice = PVE::QemuServer::vga_uses_spice($vga);
             $status->{spice} = 1 if $spice;
             $status->{clipboard} = $vga->{clipboard};
         }

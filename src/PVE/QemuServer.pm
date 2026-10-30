@@ -171,7 +171,10 @@ my $vga_fmt = {
         optional => 1,
         default_key => 1,
         enum => [
-            qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware)
+            qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware ramfb mdev
+                bochs-display ati-vga isa-vga isa-cirrus-vga secondary-vga qxl-pci
+                virtio-gpu-pci virtio-gpu-gl-pci virtio-gpu-device virtio-gpu-gl-device
+                vhost-user-vga vhost-user-gpu-pci)
         ],
     },
     memory => {
@@ -189,6 +192,28 @@ my $vga_fmt = {
         type => 'string',
         enum => ['vnc'],
         optional => 1,
+    },
+    gl => {
+        type => 'boolean',
+        optional => 1,
+        default => 1,
+        description => 'Enable EGL headless rendering for VGA type mdev. Required for DMA-BUF'
+            . ' displays. Disable only for devices providing a CPU-accessible display region.',
+    },
+    rendernode => {
+        type => 'string',
+        optional => 1,
+        pattern => '/dev/dri/renderD[0-9]+',
+        format_description => 'path',
+        description => 'Host DRM render node for a display using OpenGL.'
+            . ' Leave unset to let EGL select a render node automatically.',
+    },
+    'ati-model' => {
+        type => 'string',
+        optional => 1,
+        enum => [qw(rage128p rv100)],
+        description =>
+            'ATI model for ati-vga. Defaults to rage128p; rv100 requires at least 16 MiB VRAM.',
     },
 };
 
@@ -1170,7 +1195,8 @@ sub pve_verify_hotplug_features {
 sub assert_clipboard_config {
     my ($vga) = @_;
 
-    my $clipboard_regex = qr/^(std|cirrus|vmware|virtio|qxl)/;
+    my $clipboard_regex =
+        qr/^(std|cirrus|vmware|virtio|qxl|bochs-display|ati-vga|isa-|secondary-vga|vhost-user-)/;
 
     if (
         $vga->{'clipboard'}
@@ -1489,6 +1515,12 @@ my $vga_map = {
     'vmware' => 'vmware-svga',
     'virtio' => 'virtio-vga',
     'virtio-gl' => 'virtio-vga-gl',
+    (
+        map { $_ => $_ }
+            qw(bochs-display ati-vga isa-vga isa-cirrus-vga secondary-vga
+            virtio-gpu-pci virtio-gpu-gl-pci virtio-gpu-device virtio-gpu-gl-device
+            vhost-user-vga vhost-user-gpu-pci)
+    ),
 };
 
 # QEMU builds only the non-VGA variants of the virtio GPU for aarch64
@@ -1507,12 +1539,23 @@ my sub map_vga_model {
 sub print_vga_device {
     my ($conf, $vga, $arch, $machine_version, $id, $qxlnum) = @_;
 
+    die "display type '$vga->{type}' is only supported on x86_64\n"
+        if $arch ne 'x86_64' && $vga->{type} =~ m/^(?:isa-|qxl|vmware|vhost-user-vga)/;
+    die "MMIO graphics require the aarch64 virt machine\n"
+        if $vga->{type} =~ m/^virtio-gpu(?:-gl)?-device$/ && $arch ne 'aarch64';
+
+    if ($vga->{type} eq 'ramfb') {
+        die "ramfb requires UEFI firmware (bios=ovmf)\n"
+            if ($conf->{bios} // '') ne 'ovmf' && $arch ne 'aarch64';
+        return 'ramfb,id=vga'; # a sysbus device, without PCI address or VGA memory
+    }
+
     my $type = map_vga_model($vga->{type}, $arch);
     my $vgamem_mb = $vga->{memory};
 
     my $max_outputs = '';
     if ($qxlnum) {
-        $type = $id ? 'qxl' : 'qxl-vga';
+        $type = $id || $vga->{type} eq 'qxl-pci' ? 'qxl' : 'qxl-vga';
 
         if (!$conf->{ostype} || $conf->{ostype} =~ m/^(?:l\d\d)|(?:other)$/) {
             # set max outputs so linux can have up to 4 qxl displays with one device
@@ -1526,9 +1569,21 @@ sub print_vga_device {
 
     my $memory = "";
     if ($vgamem_mb) {
+        die "bochs-display video memory must not exceed 256 MiB\n"
+            if $vga->{type} eq 'bochs-display' && $vgamem_mb > 256;
+        die "Cirrus video memory must be 4, 8 or 16 MiB\n"
+            if $vga->{type} =~ m/^(?:cirrus|isa-cirrus-vga)$/ && $vgamem_mb !~ m/^(4|8|16)$/;
+        die "ATI rv100 requires at least 16 MiB video memory\n"
+            if $vga->{type} eq 'ati-vga'
+            && ($vga->{'ati-model'} // '') eq 'rv100'
+            && $vgamem_mb < 16;
         if ($vga->{type} =~ /^virtio/) {
             my $bytes = PVE::Tools::convert_size($vgamem_mb, "mb" => "b");
             $memory = ",max_hostmem=$bytes";
+        } elsif ($vga->{type} eq 'bochs-display') {
+            $memory = ',vgamem=' . ($vgamem_mb * 1024 * 1024);
+        } elsif (vga_is_vhost_user($vga)) {
+            die "vhost-user graphics do not support the VGA memory option\n";
         } elsif ($qxlnum) {
             # from https://www.spice-space.org/multiple-monitors.html
             $memory = ",vgamem_mb=$vga->{memory}";
@@ -1550,15 +1605,40 @@ sub print_vga_device {
     my $q35 = PVE::QemuServer::Machine::machine_type_is_q35($conf);
     my $vgaid = "vga" . ($id // '');
     my $pciaddr;
-    if ($q35 && $vgaid eq 'vga') {
+    if ($vga->{type} =~ m/^(?:isa-|virtio-gpu(?:-gl)?-device$)/) {
+        $pciaddr = ''; # ISA and virtio-mmio devices do not have a PCI address.
+    } elsif ($q35 && $vgaid eq 'vga') {
         # the first display uses pcie.0 bus on q35 machines
         $pciaddr = print_pcie_addr($vgaid);
     } else {
         $pciaddr = print_pci_addr($vgaid, $arch);
     }
 
-    if ($vga->{type} eq 'virtio-gl') {
-        # VirGL renders on the host, so the guest arch is irrelevant for the library lookup
+    my $options = '';
+    $options .= ",model=$vga->{'ati-model'}" if $vga->{type} eq 'ati-vga' && $vga->{'ati-model'};
+    $options .= ',chardev=vgpu' if vga_is_vhost_user($vga);
+    return "$type,id=${vgaid}${memory}${max_outputs}${pciaddr}${edidoff}${options}";
+}
+
+sub vga_is_vhost_user {
+    my ($vga) = @_;
+    return ($vga->{type} // '') =~ m/^vhost-user-(?:vga|gpu-pci)$/;
+}
+
+sub vga_needs_gl {
+    my ($vga) = @_;
+    my $type = $vga->{type} // '';
+    return 1 if $type =~ m/^virtio-(?:gl|gpu-gl-(?:pci|device))$/;
+    return 1 if vga_is_vhost_user($vga); # The console always advertises DMA-BUF.
+    return $vga->{gl} // 1 if $type eq 'mdev';
+    return 0;
+}
+
+sub print_egl_headless {
+    my ($vga) = @_;
+
+    if (vga_needs_gl($vga)) {
+        # Rendering uses host libraries regardless of the guest architecture.
         my $host_arch = get_host_arch();
         my $base = "/usr/lib/${host_arch}-linux-gnu/lib";
 
@@ -1567,10 +1647,12 @@ sub print_vga_device {
 
         die
             "no DRM render node detected (/dev/dri/renderD*), no GPU? - needed for '$vga->{type}' display\n"
-            if !PVE::Tools::dir_glob_regex('/dev/dri/', "renderD.*");
+            if !$vga->{rendernode} && !PVE::Tools::dir_glob_regex('/dev/dri/', "renderD.*");
+        my $display = 'egl-headless,gl=core';
+        $display .= ",rendernode=$vga->{rendernode}" if $vga->{rendernode};
+        return $display;
     }
-
-    return "$type,id=${vgaid}${memory}${max_outputs}${pciaddr}${edidoff}";
+    return undef;
 }
 
 sub vm_is_volid_owner {
@@ -2960,9 +3042,17 @@ sub vga_conf_has_spice {
 
     my $vgaconf = parse_vga($vga);
     my $vgatype = $vgaconf->{type};
+    return 1 if ($vgatype // '') eq 'qxl-pci';
     return 0 if !$vgatype || $vgatype !~ m/^qxl([234])?$/;
 
     return $1 || 1;
+}
+
+# Keep this separate from the QXL monitor count used by get_vga_properties.
+sub vga_uses_spice {
+    my ($vga) = @_;
+    return ($vga->{type} // '') =~
+        m/^(?:qxl(?:[234]|-pci)?|virtio(?:-gl|-gpu(?:-gl)?-(?:pci|device))?|vhost-user-(?:vga|gpu-pci)|mdev|ramfb)$/;
 }
 
 # To use query_supported_cpu_flags and query_understood_cpu_flags (moved to the
@@ -3094,8 +3184,14 @@ my sub get_vga_properties {
 
     my $vga = parse_vga($conf->{vga});
 
+    die "gl is only supported with VGA type mdev\n"
+        if defined($vga->{gl}) && ($vga->{type} // '') ne 'mdev';
+    die "rendernode requires an OpenGL display\n" if $vga->{rendernode} && !vga_needs_gl($vga);
+    die "ati-model requires display type ati-vga\n"
+        if $vga->{'ati-model'} && ($vga->{type} // '') ne 'ati-vga';
+
     my $qxlnum = vga_conf_has_spice($conf->{vga});
-    $vga->{type} = 'qxl' if $qxlnum;
+    $vga->{type} = 'qxl' if $qxlnum && $vga->{type} ne 'qxl-pci';
 
     if (!$vga->{type}) {
         if ($arch eq 'aarch64') {
@@ -3433,10 +3529,17 @@ sub config_to_command {
     push @$cmd, '-no-reboot' if defined($conf->{reboot}) && $conf->{reboot} == 0;
 
     if ($vga->{type} && $vga->{type} !~ m/^serial\d+$/ && $vga->{type} ne 'none') {
+        if (vga_is_vhost_user($vga)) {
+            # Dedicated per-VM path: never connect a user-supplied host socket.
+            push @$devices, '-chardev', "socket,id=vgpu,path=/run/qemu-server/$vmid.vgpu";
+        }
         push @$devices, '-device',
-            print_vga_device($conf, $vga, $arch, $machine_version, undef, $qxlnum);
+            print_vga_device($conf, $vga, $arch, $machine_version, undef, $qxlnum)
+            if $vga->{type} ne 'mdev';
 
-        push @$cmd, '-display', 'egl-headless,gl=core' if $vga->{type} eq 'virtio-gl'; # VIRGL
+        if (my $egl = print_egl_headless($vga)) {
+            push @$cmd, '-display', $egl;
+        }
 
         my $socket = PVE::QemuServer::Helpers::vnc_socket($vmid);
         push @$cmd, '-vnc', "unix:$socket,password=on";
@@ -3480,6 +3583,7 @@ sub config_to_command {
         $virtiofs_enabled,
         $cmd,
         $machineFlags,
+        vga_is_vhost_user($vga),
     );
 
     push @$cmd, '-S' if $conf->{freeze};
@@ -3513,7 +3617,7 @@ sub config_to_command {
     my $spice_port;
 
     assert_clipboard_config($vga);
-    my $is_spice = $qxlnum || $vga->{type} =~ /^virtio/;
+    my $is_spice = vga_uses_spice($vga);
 
     if ($is_spice || ($vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc')) {
         if ($qxlnum > 1) {

@@ -531,8 +531,11 @@ $pve_common_sysfstools->mock(
         my ($filter, $verbose) = @_;
 
         return [
-            map { { id => $_ } }
-            grep {
+            map { {
+                id => $_,
+                class => /^(?:0000:00:02\.0|0000:01:00\.[456])$/ ? '0x030000' : '0x020000',
+                vendor => /^0000:00:02\.0$/ ? '0x8086' : '0x10de',
+            } } grep {
                 !defined($filter)
                     || (!ref($filter) && $_ =~ m/^(0000:)?\Q$filter\E/)
                     || (ref($filter) eq 'CODE' && $filter->({ id => $_ }))
