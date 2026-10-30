@@ -81,6 +81,7 @@ use PVE::QemuServer::Drive qw(
 );
 use PVE::QemuServer::DriveDevice qw(print_drivedevice_full scsihw_infos);
 use PVE::QemuServer::EMMC;
+use PVE::QemuServer::SDCard;
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::MetaInfo;
@@ -405,7 +406,7 @@ EODESC
         format => 'pve-qm-bootdisk',
         description =>
             "Enable booting from specified disk. Deprecated: Use 'boot: order=foo;bar' instead.",
-        pattern => '(ide|sata|scsi|virtio|nvme|usbdisk)\d+',
+        pattern => '(ide|sata|scsi|virtio|nvme|usbdisk|sdcard)\d+',
     },
     smp => {
         optional => 1,
@@ -2062,7 +2063,7 @@ sub parse_vm_config {
             } else {
                 $key = 'ide2' if $key eq 'cdrom';
                 my $fmt = $section->{schema}->{$key}->{format};
-                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata|nvme|usbdisk|emmc)$/) {
+                if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata|nvme|usbdisk|emmc|sdcard)$/) {
                     my $v = parse_drive($key, $value);
                     if (my $volid = filename_to_volume_id($vmid, $v->{file}, $v->{media})) {
                         $v->{file} = $volid;
@@ -3690,6 +3691,19 @@ sub config_to_command {
                 }
             }
 
+            if ($drive->{interface} eq 'sdcard') {
+                PVE::QemuServer::SDCard::validate_image($storecfg, $drive);
+                if (!$is_template) {
+                    PVE::QemuServer::SDCard::assert_qemu_support(
+                        $drive, $arch, $bootorder->{$ds},
+                    );
+                    my $pciaddr = print_pci_addr("sdhci-$ds", $arch);
+                    my $controller = "sdhci-pci,id=sdhci-$ds,sd-spec-version=2$pciaddr";
+                    $controller .= ",bootindex=$bootorder->{$ds}" if defined($bootorder->{$ds});
+                    push @$devices, '-device', $controller;
+                }
+            }
+
             if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev
                 if ($drive->{file} ne 'none') {
                     my $throttle_group =
@@ -4805,7 +4819,7 @@ sub vmconfig_hotplug_pending {
             } elsif (is_valid_drivename($opt)) {
                 die "skip\n"
                     if !$hotplug_features->{disk}
-                    || $opt =~ m/(efidisk|ide|sata|nvme|emmc|tpmstate)(\d+)/;
+                    || $opt =~ m/(efidisk|ide|sata|nvme|emmc|sdcard|tpmstate)(\d+)/;
                 vm_deviceunplug($vmid, $conf, $opt);
                 vmconfig_delete_or_detach_drive($vmid, $storecfg, $conf, $opt, $force);
             } elsif ($opt =~ m/^memory$/) {
@@ -5272,7 +5286,7 @@ sub vmconfig_update_disk {
 
             if ($drive->{file} ne $old_drive->{file}) {
 
-                die "skip\n" if !$hotplug || $drive->{interface} =~ m/^(nvme|emmc)$/;
+                die "skip\n" if !$hotplug || $drive->{interface} =~ m/^(nvme|emmc|sdcard)$/;
 
                 # unplug and register as unused
                 vm_deviceunplug($vmid, $conf, $opt);
@@ -5306,6 +5320,11 @@ sub vmconfig_update_disk {
                         $drive->{interface} eq 'emmc' && grep {
                             safe_string_ne($drive->{$_}, $old_drive->{$_})
                         } qw(boot-partition-size rpmb-partition-size boot-config auth-key cid)
+                    )
+                    || (
+                        $drive->{interface} eq 'sdcard' && grep {
+                            safe_string_ne($drive->{$_}, $old_drive->{$_})
+                        } qw(cid sd-spec-version)
                     )
                 ) {
                     die "skip\n";
@@ -5377,7 +5396,7 @@ sub vmconfig_update_disk {
         }
     }
 
-    die "skip\n" if !$hotplug || $opt =~ m/(ide|sata|nvme|emmc)(\d+)/;
+    die "skip\n" if !$hotplug || $opt =~ m/(ide|sata|nvme|emmc|sdcard)(\d+)/;
     if ($drive->{interface} eq 'usbdisk') {
         # The first USB disk needs a controller and PCI bridge created at VM start.
         my $devices = vm_devices_list($vmid);
@@ -6683,11 +6702,12 @@ my $parse_backup_hints = sub {
             $check_storage->($storeid, $scfg); # permission and content type check
 
             $virtdev_hash->{$virtdev} = $devinfo->{$devname};
-        } elsif ($line =~ m/^((?:nvme|emmc)\d+):\s*(\S+)\s*$/) {
+        } elsif ($line =~ m/^((?:nvme|emmc|sdcard)\d+):\s*(\S+)\s*$/) {
             my ($id, $value) = ($1, $2);
             my $drive = parse_drive($id, $value)
                 or die "unable to parse disk '$id' in backup configuration\n";
-            $layout_drives->{$id} = $drive if $drive->{interface} eq 'emmc' || $drive->{ms};
+            $layout_drives->{$id} = $drive
+                if $drive->{interface} =~ m/^(?:emmc|sdcard)$/ || $drive->{ms};
         } elsif ($line =~ m/^((?:ide|sata|scsi)\d+):\s*(.*)\s*$/) {
             my $virtdev = $1;
             my $drive = parse_drive($virtdev, $2);
@@ -6758,6 +6778,8 @@ my $restore_allocate_devices = sub {
             my $target_size = PVE::Storage::volume_size_info($storecfg, $volid, 10);
             if ($drive->{interface} eq 'emmc') {
                 PVE::QemuServer::EMMC::validate_size($drive, $target_size);
+            } elsif ($drive->{interface} eq 'sdcard') {
+                PVE::QemuServer::SDCard::validate_size($drive, $target_size);
             } else {
                 PVE::QemuServer::NVMe::assert_copy_size($drive, $d->{size}, $target_size);
             }
@@ -6803,8 +6825,8 @@ sub restore_update_config_line {
         $net->{macaddr} = PVE::Tools::random_ether_addr($dc->{mac_prefix}) if $net->{macaddr};
         $netstr = PVE::QemuServer::Network::print_net($net);
         $res .= "$id: $netstr\n";
-    } elsif (
-        $line =~ m/^((ide|scsi|virtio|sata|nvme|usbdisk|emmc|efidisk|tpmstate)\d+):\s*(\S+)\s*$/
+    } elsif ($line =~
+        m/^((ide|scsi|virtio|sata|nvme|usbdisk|emmc|sdcard|efidisk|tpmstate)\d+):\s*(\S+)\s*$/
     ) {
         my $virtdev = $1;
         my $value = $3;
@@ -8197,6 +8219,8 @@ sub clone_disk {
             PVE::QemuServer::NVMe::assert_copy_size($drive, $size, $target_size);
         } elsif (($drive->{interface} // '') eq 'emmc') {
             PVE::QemuServer::EMMC::validate_image($storecfg, { %$drive, file => $newvolid });
+        } elsif (($drive->{interface} // '') eq 'sdcard') {
+            PVE::QemuServer::SDCard::validate_image($storecfg, { %$drive, file => $newvolid });
         }
 
         if (drive_is_cloudinit($drive)) {

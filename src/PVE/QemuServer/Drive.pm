@@ -15,6 +15,7 @@ use PVE::Tools;
 
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::EMMC;
+use PVE::QemuServer::SDCard;
 use PVE::QemuServer::NVMe;
 use PVE::QemuServer::Monitor qw(qsd_qmp_peer vm_qmp_peer);
 
@@ -161,6 +162,7 @@ our $MAX_SATA_DISKS = 6;
 my $MAX_NVME_DISKS = 16;
 our $MAX_USB_DISKS = 8;
 our $MAX_EMMC_DISKS = 4;
+our $MAX_SDCARD_DISKS = 4;
 our $MAX_UNUSED_DISKS = 256;
 our $NEW_DISK_RE = qr!^(([^/:\s]+):)?(\d+(\.\d+)?)$!;
 
@@ -597,6 +599,37 @@ my $emmcdesc = {
 };
 PVE::JSONSchema::register_standard_option('pve-qm-emmc', $emmcdesc);
 
+my %sdcard_sub_fmt = (
+    'sd-spec-version' => {
+        type => 'integer',
+        enum => [2, 3],
+        optional => 1,
+        description => 'SD physical specification: 2 for v2.00, 3 for v3.01 (QEMU default).',
+    },
+);
+my $sdcard_fmt = {
+    %drivedesc_base,
+    %sdcard_sub_fmt,
+    cid => {
+        %{ $emmc_sub_fmt{cid} },
+        description =>
+            'SD card identification register (32 hex characters). Omit to use the QEMU default.'
+            . ' Requires QEMU support for sd-card.cid. SDHCI omits the CRC byte, so Linux reports the last byte as 00.'
+            . ' Changes require a VM shutdown.',
+    },
+    media => { %{ $drivedesc_base{media} }, enum => ['disk'] },
+};
+delete $sdcard_fmt->@{qw(serial rerror werror discard)};
+my $sdcarddesc = {
+    optional => 1,
+    type => 'string',
+    format => $sdcard_fmt,
+    description => 'Use volume as an SD card on a dedicated SDHCI controller (n is 0 to '
+        . ($MAX_SDCARD_DISKS - 1)
+        . '). Uses the entire image without eMMC boot/RPMB partitions. Device and capacity changes require a VM shutdown.',
+};
+PVE::JSONSchema::register_standard_option('pve-qm-sdcard', $sdcarddesc);
+
 my $sata_fmt = {
     %drivedesc_base, %ssd_fmt, %wwn_fmt,
 };
@@ -727,6 +760,7 @@ my $alldrive_fmt = {
     %nvme_sub_fmt,
     %usbdisk_sub_fmt,
     %emmc_sub_fmt,
+    %sdcard_sub_fmt,
     %product_fmt,
     %queues_fmt,
     %readonly_fmt,
@@ -839,6 +873,11 @@ for (my $i = 0; $i < $MAX_EMMC_DISKS; $i++) {
     $drivedesc_hash_with_alloc->{"emmc$i"} = $desc_with_alloc->('emmc', $emmcdesc);
 }
 
+for (my $i = 0; $i < $MAX_SDCARD_DISKS; $i++) {
+    $drivedesc_hash->{"sdcard$i"} = $sdcarddesc;
+    $drivedesc_hash_with_alloc->{"sdcard$i"} = $desc_with_alloc->('sdcard', $sdcarddesc);
+}
+
 $drivedesc_hash->{efidisk0} = $efidisk_desc;
 $drivedesc_hash_with_alloc->{efidisk0} = $desc_with_alloc->('efidisk', $efidisk_desc);
 
@@ -864,6 +903,7 @@ sub valid_drive_names {
         (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
         (map { "usbdisk$_" } (0 .. ($MAX_USB_DISKS - 1))),
         (map { "emmc$_" } (0 .. ($MAX_EMMC_DISKS - 1))),
+        (map { "sdcard$_" } (0 .. ($MAX_SDCARD_DISKS - 1))),
         'efidisk0',
         'tpmstate0',
     );
@@ -1003,11 +1043,19 @@ sub parse_drive {
     $res->{index} = $index;
 
     return
-        if ($interface eq 'nvme' || $interface eq 'usbdisk' || $interface eq 'emmc')
+        if ($interface =~ m/^(?:nvme|usbdisk|emmc|sdcard)$/)
         && ($res->{file} eq 'none' || $res->{file} eq 'cdrom' || drive_is_cloudinit($res));
 
     if ($interface eq 'emmc') {
         eval { PVE::QemuServer::EMMC::validate_options($res); };
+        if (my $err = $@) {
+            warn $err;
+            return;
+        }
+    }
+
+    if ($interface eq 'sdcard') {
+        eval { PVE::QemuServer::SDCard::validate_options($res); };
         if (my $err = $@) {
             warn $err;
             return;

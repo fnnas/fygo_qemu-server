@@ -28,6 +28,7 @@ SOURCES=Agent.pm	\
 	QMPHelpers.pm	\
 	QSD.pm		\
 	RNG.pm		\
+	SDCard.pm	\
 	RunState.pm	\
 	StateFile.pm	\
 	USB.pm		\

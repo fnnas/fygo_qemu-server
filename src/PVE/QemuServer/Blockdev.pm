@@ -70,7 +70,7 @@ my sub is_fleecing_top_node {
 sub qdev_id_to_drive_id {
     my ($qdev_id) = @_;
 
-    if ($qdev_id =~ m{^/machine/peripheral/((?:virtio|emmc|nvme)\d+)/virtio-backend$}) {
+    if ($qdev_id =~ m{^/machine/peripheral/((?:virtio|emmc|sdcard|nvme)\d+)/virtio-backend$}) {
         return $1;
     } elsif ($qdev_id =~ m|^/machine/peripheral/(usbdisk\d+)/\1\.0/legacy\[0\]$|) {
         return $1;
@@ -80,7 +80,7 @@ sub qdev_id_to_drive_id {
         return 'efidisk0';
     }
 
-    return $1 if $qdev_id =~ m{^/machine/peripheral/((?:emmc|nvme)\d+)$};
+    return $1 if $qdev_id =~ m{^/machine/peripheral/((?:emmc|sdcard|nvme)\d+)$};
 
     return $qdev_id; # for SCSI/SATA/IDE it's the same
 }
@@ -739,6 +739,8 @@ sub resize {
         if $running && $drive_id =~ m/^nvme\d+$/;
     die "cannot resize eMMC disk '$drive_id' while the VM is running - shut down the VM first\n"
         if $running && $drive_id =~ m/^emmc\d+$/;
+    die "cannot resize SD card '$drive_id' while the VM is running - shut down the VM first\n"
+        if $running && $drive_id =~ m/^sdcard\d+$/;
 
     PVE::Storage::volume_resize($storecfg, $volid, $size, $running);
 
