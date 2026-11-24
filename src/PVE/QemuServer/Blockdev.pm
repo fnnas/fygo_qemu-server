@@ -127,6 +127,15 @@ sub get_block_info {
     return $block_info;
 }
 
+sub get_named_node {
+    my ($vmid, $node_name) = @_;
+    my $nodes = mon_cmd($vmid, 'query-named-block-nodes');
+    for my $node ($nodes->@*) {
+        return $node if ($node->{'node-name'} // '') eq $node_name;
+    }
+    return;
+}
+
 sub get_node_name {
     my ($type, $drive_id, $volid, $options) = @_;
 
@@ -181,7 +190,8 @@ sub get_node_name_below_throttle {
     if ($qmp_peer->{type} eq 'qmp') { # get_block_info() only works if there are front-end devices.
         my $block_info = get_block_info($qmp_peer->{id});
         my $drive_id = $device_id =~ s/^drive-//r;
-        $top = $block_info->{$drive_id}->{inserted};
+        $top = ($block_info->{$drive_id} // {})->{inserted}
+            // get_named_node($qmp_peer->{id}, $device_id);
     } else {
         my $named_block_node_info = qmp_cmd($qmp_peer, 'query-named-block-nodes');
         for my $info ($named_block_node_info->@*) {
@@ -735,7 +745,7 @@ sub detach_fleecing_block_nodes {
 }
 
 sub resize {
-    my ($vmid, $deviceid, $storecfg, $volid, $size) = @_;
+    my ($vmid, $deviceid, $storecfg, $volid, $size, $disconnected) = @_;
 
     my $running = PVE::QemuServer::Helpers::vm_running_locally($vmid);
     my $drive_id = $deviceid =~ s/^drive-//r;
@@ -748,7 +758,13 @@ sub resize {
         if $running && $drive_id =~ m/^sdcard\d+$/;
 
     my $inserted;
-    if ($running && $drive_id =~ /^usbdisk\d+$/) {
+    if ($running && $disconnected) {
+        $inserted = get_named_node($vmid, $deviceid)
+            or die
+            "cannot resize disconnected disk '$drive_id' while the VM is running - shut down the VM first\n";
+        die "cannot resize read-only disconnected disk '$drive_id' while the VM is running\n"
+            if $inserted->{ro};
+    } elsif ($running && $drive_id =~ /^usbdisk\d+$/) {
         # A removable USB disk may have been ejected by the guest. Check
         # that QEMU can resize it before changing the backing volume.
         $inserted = get_block_info($vmid)->{$drive_id}->{inserted}

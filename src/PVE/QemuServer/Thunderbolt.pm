@@ -49,6 +49,12 @@ my $dock_format = {
         maximum => $DOWNSTREAM_PORTS,
         description => 'Port on the parent dock or controller.',
     },
+    disconnected => {
+        type => 'boolean',
+        description => 'Disconnect the dock while keeping its configured upstream port.',
+        optional => 1,
+        default => 0,
+    },
 };
 
 sub config_descriptions {
@@ -150,6 +156,7 @@ sub topology {
         }
         die "$id: Thunderbolt dock '$dock_id' already has an NVMe disk\n" if $dock->{drive_id};
         $dock->{drive_id} = $id;
+        $dock->{drive_disconnected} = $drive->{disconnected};
         $dock->{serial} = uri_unescape($drive->{serial} // $id);
     }
     for my $dock (values %$docks) {
@@ -160,14 +167,20 @@ sub topology {
 }
 
 sub dock_device {
-    my ($id, $dock) = @_;
+    my ($id, $dock, $nvme_hotplug) = @_;
     my $spec = "usb4-device,id=$id,bus=$dock->{root}.0,port=$dock->{port},dock=on"
         . ",downstream-ports=$dock->{downstream_ports}";
     $spec .= ",parent=$dock->{parent}" if $dock->{parent};
+    $spec .= ',x-cable=off' if $dock->{disconnected};
     my $serial = ($dock->{serial} // $id) =~ s/,/,,/gr;
     $spec .= ",serial=$serial";
     if (my $disk = $dock->{drive_id}) {
-        $spec .= ",drive=drive-$disk";
+        if ($nvme_hotplug) {
+            $spec .= ",drive=drive-$disk,x-dock-nvme-hotplug=on";
+            $spec .= ',x-nvme-disconnected=on' if $dock->{drive_disconnected};
+        } elsif (!$dock->{drive_disconnected}) {
+            $spec .= ",drive=drive-$disk";
+        }
     }
     return $spec;
 }
@@ -208,6 +221,7 @@ sub devices {
     my ($hosts, $docks, $order, $binary, $dry_run) = @_;
     return () if !keys %$hosts;
     my $can_reserve_dock = $dry_run;
+    my $nvme_hotplug = $dry_run;
     if (!$dry_run) {
         my %devices;
         eval {
@@ -240,6 +254,21 @@ sub devices {
         };
         die "Chained Thunderbolt docks require a QEMU build with downstream resource reservation\n"
             if !$can_reserve_dock && grep { $_->{parent} } values %$docks;
+        if (grep { $_->{drive_id} || $_->{disconnected} } values %$docks) {
+            my %properties;
+            eval {
+                PVE::Tools::run_command(
+                    [$binary, '-device', 'usb4-device,help'],
+                    timeout => 10,
+                    outfunc => sub { $properties{$1} = 1 if $_[0] =~ /^\s*(x-[\w-]+)=</ },
+                    errfunc => sub { },
+                );
+            };
+            %properties = () if $@;
+            $nvme_hotplug = $properties{'x-dock-nvme-hotplug'};
+            die "Disconnected Thunderbolt docks require QEMU support for usb4-device.x-cable\n"
+                if !$properties{'x-cable'} && grep { $_->{disconnected} } values %$docks;
+        }
     }
 
     my @devices;
@@ -275,7 +304,8 @@ sub devices {
                 "usb4-tunnel-port,id=$target,bus=pcie.0,addr=0x1f.$function,chassis=$chassis"
                 . ",bus-reserve=32,mem-reserve=32M,usb4-port=$port";
             # Preserve the cold-plug behavior of existing integrated disks.
-            $tunnel .= ',x-force-tunnel=on' if $dock && ($dock->{drive_id} || $model =~ /^tb3-/);
+            $tunnel .= ',x-force-tunnel=on'
+                if $dock && !$dock->{disconnected} && ($dock->{drive_id} || $model =~ /^tb3-/);
             push @devices, '-device', $tunnel;
         }
         push @devices, '-device', $spec;
@@ -283,7 +313,7 @@ sub devices {
 
     for my $id (@$order) {
         my $dock = $docks->{$id};
-        push @devices, '-device', dock_device($id, $dock);
+        push @devices, '-device', dock_device($id, $dock, $nvme_hotplug);
         for my $port (sort keys %{ $dock->{disks} // {} }) {
             my $disk = $dock->{disks}->{$port};
             push @devices, '-device',

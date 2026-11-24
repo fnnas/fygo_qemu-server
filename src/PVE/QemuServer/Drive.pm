@@ -172,6 +172,12 @@ our $drivedesc_hash;
 our $drivedesc_hash_with_alloc = {};
 
 my %drivedesc_base = (
+    disconnected => {
+        type => 'boolean',
+        description => 'Keep this disk configured and hide it from the guest.',
+        optional => 1,
+        default => 0,
+    },
     volume => { alias => 'file' },
     file => {
         type => 'string',
@@ -1050,6 +1056,8 @@ sub parse_drive {
     $res->{interface} = $interface;
     $res->{index} = $index;
 
+    return if $res->{disconnected} && ($res->{file} eq 'none' || drive_is_cdrom($res));
+
     return
         if ($interface =~ m/^(?:nvme|usbdisk|emmc|sdcard)$/)
         && ($res->{file} eq 'none' || $res->{file} eq 'cdrom' || drive_is_cloudinit($res));
@@ -1213,6 +1221,7 @@ sub bootdisk_size {
         next if !$conf->{$bootdisk};
         my $drive = parse_drive($bootdisk, $conf->{$bootdisk});
         next if !defined($drive);
+        next if $drive->{disconnected};
         next if drive_is_cdrom($drive);
         my $volid = $drive->{file};
         next if !$volid;
@@ -1292,7 +1301,9 @@ sub resolve_first_disk {
     foreach my $ds (@disks) {
         next if !$conf->{$ds};
         my $disk = parse_drive($ds, $conf->{$ds});
-        next if $disk && $disk->{interface} eq 'nvme' && $disk->{detached};
+        next
+            if $disk
+            && ($disk->{disconnected} || ($disk->{interface} eq 'nvme' && $disk->{detached}));
         next if drive_is_cdrom($disk) xor $cdrom;
         return $ds;
     }

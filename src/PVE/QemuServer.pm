@@ -3899,6 +3899,13 @@ sub config_to_command {
                 push @$devices, '-drive', $drive_cmd;
             }
 
+            # A dock must remember its built-in disk even when the namespace starts disconnected.
+            if ($drive->{'nvme-dock'} && !$drive->{'nvme-dock-port'}) {
+                $thunderbolt_drives{$ds} = $drive;
+                return;
+            }
+            # Keep the block node for storage operations, and omit the guest device.
+            return if $drive->{disconnected};
             if ($drive->{'nvme-dock'}) {
                 $thunderbolt_drives{$ds} = $drive;
                 return;
@@ -4141,10 +4148,10 @@ sub vm_devices_list {
 }
 
 sub vm_deviceplug {
-    my ($storecfg, $conf, $vmid, $deviceid, $device, $arch, $machine_type) = @_;
+    my ($storecfg, $conf, $vmid, $deviceid, $device, $arch, $machine_type, $reuse_backend) = @_;
 
     my $devices_list = vm_devices_list($vmid);
-    if ($deviceid =~ /^usbdisk\d+$/ && !defined($conf->{$deviceid})) {
+    if ($deviceid =~ /^usbdisk\d+$/ && !defined($conf->{$deviceid}) && !$reuse_backend) {
         # A failed hotplug may have left a frontend or backend behind when
         # cleanup also failed. Recreate it from the current request rather
         # than adopting a possibly different pending disk or set of options.
@@ -4177,14 +4184,14 @@ sub vm_deviceplug {
     } elsif ($deviceid =~ m/^(virtio)(\d+)$/) {
         qemu_iothread_add($vmid, $deviceid, $device);
 
-        qemu_driveadd($storecfg, $vmid, $device);
+        qemu_driveadd($storecfg, $vmid, $device) if !$reuse_backend;
         my $devicefull =
             print_drivedevice_full($storecfg, $conf, $vmid, $device, $arch, $machine_type);
 
         qemu_deviceadd($vmid, $devicefull);
         eval { qemu_deviceaddverify($vmid, $deviceid); };
         if (my $err = $@) {
-            eval { qemu_drivedel($vmid, $deviceid); };
+            eval { qemu_drivedel($vmid, $deviceid) if !$reuse_backend; };
             warn $@ if $@;
             die $err;
         }
@@ -4209,7 +4216,7 @@ sub vm_deviceplug {
     } elsif ($deviceid =~ m/^(scsi|usbdisk)(\d+)$/) {
         qemu_findorcreatescsihw($storecfg, $conf, $vmid, $device, $arch, $machine_type)
             if $device->{interface} eq 'scsi';
-        qemu_driveadd($storecfg, $vmid, $device);
+        qemu_driveadd($storecfg, $vmid, $device) if !$reuse_backend;
 
         my $devicefull =
             print_drivedevice_full($storecfg, $conf, $vmid, $device, $arch, $machine_type);
@@ -4217,11 +4224,12 @@ sub vm_deviceplug {
         eval {
             qemu_deviceadd($vmid, $devicefull);
             $added = 1;
-            qemu_deviceaddverify($vmid, $deviceid) if $device->{interface} eq 'usbdisk';
+            qemu_deviceaddverify($vmid, $deviceid)
+                if $reuse_backend || $device->{interface} eq 'usbdisk';
         };
         if (my $err = $@) {
             my $cleanup_backend = 1;
-            if ($added && $device->{interface} eq 'usbdisk') {
+            if ($added && ($reuse_backend || $device->{interface} eq 'usbdisk')) {
                 eval {
                     qemu_devicedel($vmid, $deviceid);
                     qemu_devicedelverify($vmid, $deviceid);
@@ -4234,7 +4242,7 @@ sub vm_deviceplug {
                     $cleanup_backend = 0;
                 }
             }
-            if ($cleanup_backend) {
+            if ($cleanup_backend && !$reuse_backend) {
                 eval { qemu_drivedel($vmid, $deviceid); };
                 warn $@ if $@;
             }
@@ -4270,19 +4278,42 @@ sub vm_deviceplug {
 
 # fixme: this should raise exceptions on error!
 sub vm_deviceunplug {
-    my ($vmid, $conf, $deviceid) = @_;
+    my ($vmid, $conf, $deviceid, $keep_backend) = @_;
 
     my $devices_list = vm_devices_list($vmid);
     if (!defined($devices_list->{$deviceid})) {
         # A previous attempt may have removed the USB frontend before its
         # block backend failed to detach. Complete that cleanup on retry.
-        qemu_drivedel($vmid, $deviceid)
-            if $deviceid =~ m/^usbdisk\d+$/ && defined($conf->{$deviceid});
+        if (!$keep_backend && $deviceid =~ /^(?:scsi|virtio|usbdisk)\d+$/ && $conf->{$deviceid}) {
+            my $drive = parse_drive($deviceid, $conf->{$deviceid});
+            qemu_drivedel($vmid, $deviceid)
+                if $drive->{disconnected} || $deviceid =~ /^usbdisk/;
+            if ($drive->{disconnected}) {
+                if ($drive->{interface} eq 'virtio') {
+                    qemu_iothread_del($vmid, $deviceid, $drive);
+                } elsif (
+                    $drive->{interface} eq 'scsi'
+                    && ($conf->{scsihw} // '') eq 'virtio-scsi-single'
+                ) {
+                    qemu_deletescsihw($conf, $vmid, $deviceid);
+                    qemu_iothread_del($vmid, "virtioscsi$drive->{index}", $drive);
+                }
+            }
+        }
         return 1;
     }
 
     my $bootdisks = PVE::QemuServer::Drive::get_bootdisks($conf);
     die "can't unplug bootdisk '$deviceid'\n" if grep { $_ eq $deviceid } @$bootdisks;
+
+    if ($keep_backend) {
+        mon_cmd($vmid, 'device_del', id => $deviceid);
+        # PCI SHPC can take longer than five seconds to power off the slot.
+        # SCSI and USB remove the disk directly on their controller's bus.
+        my $timeout = $deviceid =~ /^virtio\d+$/ ? 15 : undef;
+        qemu_devicedelverify($vmid, $deviceid, $timeout);
+        return 1;
+    }
 
     if (
         $deviceid eq 'tablet'
@@ -4426,14 +4457,14 @@ sub qemu_deviceaddverify {
 }
 
 my sub thunderbolt_device_unplug {
-    my ($vmid, $id, $drive_id) = @_;
+    my ($vmid, $id, $drive_id, $keep_backend) = @_;
     my $devices = vm_devices_list($vmid);
     qemu_devicedel($vmid, $id) if $devices->{$id};
     qemu_devicedelverify($vmid, $id, 10);
     if ($drive_id) {
         # The USB4 router can be removed before its PCIe endpoint is drained.
         qemu_devicedelverify($vmid, $drive_id, 10);
-        qemu_drivedel($vmid, $drive_id);
+        qemu_drivedel($vmid, $drive_id) if !$keep_backend;
     }
 }
 
@@ -4473,8 +4504,47 @@ my sub thunderbolt_check_dock_bridge {
     die "skip\n";
 }
 
+my sub thunderbolt_update_dock_connection {
+    my ($vmid, $conf, $id, $dock) = @_;
+    my (undef, $docks) = PVE::QemuServer::Thunderbolt::topology($conf, {});
+    my $old = $docks->{$id};
+    # Moving a dock and changing its connection in one edit requires a restart.
+    for my $key (qw(host parent port)) {
+        die "skip\n" if ($old->{$key} // '') ne ($dock->{$key} // '');
+    }
+    return if !safe_boolean_ne($old->{disconnected}, $dock->{disconnected});
+
+    my $path = "/machine/peripheral/$id";
+    my $cable = eval { mon_cmd($vmid, 'qom-get', path => $path, property => 'x-cable'); };
+    die "skip\n" if !defined($cable);
+    my $connected = !$dock->{disconnected};
+    if (safe_boolean_ne($cable, $connected)) {
+        mon_cmd(
+            $vmid, 'qom-set',
+            path => $path,
+            property => 'x-cable',
+            value => $connected ? JSON::true : JSON::false,
+        );
+    }
+    return if $connected;
+
+    # QEMU disconnects the whole subtree. Its PCIe endpoints can still be draining.
+    my %subtree = ($id => 1);
+    for my $dock_id (keys %$docks) {
+        $subtree{$dock_id} = 1 if ($docks->{$dock_id}->{parent} // '') eq $id;
+    }
+    PVE::QemuConfig->foreach_volume(
+        $conf,
+        sub {
+            my ($drive_id, $drive) = @_;
+            qemu_devicedelverify($vmid, $drive_id, 10)
+                if $subtree{ $drive->{'nvme-dock'} // '' };
+        },
+    );
+}
+
 my sub thunderbolt_disk_plug {
-    my ($storecfg, $conf, $vmid, $id, $drive) = @_;
+    my ($storecfg, $conf, $vmid, $id, $drive, $reuse_backend) = @_;
     my $dock_id = $drive->{'nvme-dock'};
     my $port = $drive->{'nvme-dock-port'} or die "skip\n";
     my %next = (%$conf, $id => PVE::QemuServer::Drive::print_drive($drive));
@@ -4490,16 +4560,41 @@ my sub thunderbolt_disk_plug {
         $id, $dock_id, $dock->{root}, $port, $drive->{serial},
     );
     # Recover from an earlier hotplug whose cleanup could not finish.
-    thunderbolt_device_unplug($vmid, $device, $id);
+    thunderbolt_device_unplug($vmid, $device, $id, $reuse_backend);
     eval {
-        qemu_driveadd($storecfg, $vmid, $drive);
+        qemu_driveadd($storecfg, $vmid, $drive) if !$reuse_backend;
         qemu_deviceadd($vmid, $spec);
         qemu_deviceaddverify($vmid, $device);
     };
     if (my $err = $@) {
-        eval { thunderbolt_device_unplug($vmid, $device, $id) };
+        eval { thunderbolt_device_unplug($vmid, $device, $id, $reuse_backend) };
         warn $@ if $@;
         die $err;
+    }
+}
+
+my sub thunderbolt_set_builtin_nvme_connection {
+    my ($vmid, $id, $drive) = @_;
+    my $path = "/machine/peripheral/$drive->{'nvme-dock'}";
+    my $supported = eval {
+        mon_cmd($vmid, 'qom-get', path => $path, property => 'x-dock-nvme-hotplug');
+    };
+    # Existing QEMU processes may have a dock with a cold-only embedded namespace.
+    die "skip\n" if !$supported;
+    my $backend = mon_cmd($vmid, 'qom-get', path => $path, property => 'drive');
+    die "skip\n" if ($backend // '') ne "drive-$id";
+
+    my $disconnected = $drive->{disconnected};
+    mon_cmd(
+        $vmid, 'qom-set',
+        path => $path,
+        property => 'x-nvme-disconnected',
+        value => $disconnected ? JSON::true : JSON::false,
+    );
+    if ($disconnected) {
+        qemu_devicedelverify($vmid, $id, 10);
+    } else {
+        qemu_deviceaddverify($vmid, $id);
     }
 }
 
@@ -5254,7 +5349,7 @@ sub vmconfig_hotplug_pending {
                     $machine_type->(),
                 );
             } elsif ($opt =~ /^tbdock\d+$/) {
-                die "skip\n" if !$hotplug_features->{usb} || defined($conf->{$opt});
+                die "skip\n" if !$hotplug_features->{usb};
                 my %next = (%$conf, $opt => $value);
                 my $docks;
                 eval {
@@ -5263,20 +5358,24 @@ sub vmconfig_hotplug_pending {
                 };
                 die "skip\n" if $@;
                 my $dock = $docks->{$opt};
-                thunderbolt_check_port($vmid, $dock->{root}, $dock->{parent}, $dock->{port});
-                thunderbolt_check_dock_bridge($vmid, $dock->{parent}, $dock->{port});
-                thunderbolt_device_unplug($vmid, $opt);
-                eval {
-                    qemu_deviceadd(
-                        $vmid,
-                        PVE::QemuServer::Thunderbolt::dock_device($opt, $dock),
-                    );
-                    qemu_deviceaddverify($vmid, $opt);
-                };
-                if (my $err = $@) {
-                    eval { thunderbolt_device_unplug($vmid, $opt) };
-                    warn $@ if $@;
-                    die $err;
+                if (defined($conf->{$opt})) {
+                    thunderbolt_update_dock_connection($vmid, $conf, $opt, $dock);
+                } else {
+                    thunderbolt_check_port($vmid, $dock->{root}, $dock->{parent}, $dock->{port});
+                    thunderbolt_check_dock_bridge($vmid, $dock->{parent}, $dock->{port});
+                    thunderbolt_device_unplug($vmid, $opt);
+                    eval {
+                        qemu_deviceadd(
+                            $vmid,
+                            PVE::QemuServer::Thunderbolt::dock_device($opt, $dock),
+                        );
+                        qemu_deviceaddverify($vmid, $opt);
+                    };
+                    if (my $err = $@) {
+                        eval { thunderbolt_device_unplug($vmid, $opt) };
+                        warn $@ if $@;
+                        die $err;
+                    }
                 }
             } elsif (is_valid_drivename($opt)) {
                 die "skip\n" if $opt eq 'efidisk0' || $opt eq 'tpmstate0';
@@ -5702,11 +5801,58 @@ sub vmconfig_update_disk {
         my $oldmedia = $old_drive->{media} || 'disk';
         die "unable to change media type\n" if $media ne $oldmedia;
 
+        if (safe_boolean_ne($drive->{disconnected}, $old_drive->{disconnected})) {
+            # Legacy -drive backends can be deleted automatically with the frontend.
+            die "skip\n"
+                if !$hotplug
+                || !PVE::QemuServer::Machine::is_machine_version_at_least($machine_type, 10, 0)
+                || ($drive->{interface} !~ /^(?:scsi|virtio|usbdisk)$/
+                    && !$drive->{'nvme-dock'});
+            # A simultaneous device or backend change must not take effect half-way.
+            my %old = %$old_drive;
+            my %new = %$drive;
+            # These settings do not change the frontend or its block graph.
+            delete $old{$_} for qw(disconnected backup replicate size);
+            delete $new{$_} for qw(disconnected backup replicate size);
+            # The disk editor omits defaults, even when the config spelled them out.
+            # Normalize the affected options without accepting real device changes.
+            for my $options (\%old, \%new) {
+                delete $options->{discard} if ($options->{discard} // '') eq 'ignore';
+                delete $options->{$_} for grep { !$options->{$_} } qw(iothread ro ssd);
+                delete $options->{removable}
+                    if $drive->{interface} eq 'usbdisk' && ($options->{removable} // 1);
+            }
+            die "skip\n" if print_drive(\%old) ne print_drive(\%new);
+
+            my $bootdisks = PVE::QemuServer::Drive::get_bootdisks($conf);
+            die "skip\n" if grep { $_ eq $opt } @$bootdisks;
+            die "block node for disk '$opt' not found\n"
+                if !PVE::QemuServer::Blockdev::get_named_node($vmid, "drive-$opt");
+
+            if ($drive->{'nvme-dock'} && !$drive->{'nvme-dock-port'}) {
+                thunderbolt_set_builtin_nvme_connection($vmid, $opt, $drive);
+            } elsif ($drive->{disconnected}) {
+                if ($drive->{'nvme-dock-port'}) {
+                    thunderbolt_device_unplug($vmid, "tb-$opt", $opt, 1);
+                } else {
+                    vm_deviceunplug($vmid, $conf, $opt, 1);
+                }
+            } elsif ($drive->{'nvme-dock-port'}) {
+                thunderbolt_disk_plug($storecfg, $conf, $vmid, $opt, $drive, 1);
+            } else {
+                vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive, $arch, $machine_type, 1);
+            }
+            return 1;
+        }
+
         if (!drive_is_cdrom($old_drive)) {
 
             if ($drive->{file} ne $old_drive->{file}) {
 
-                die "skip\n" if !$hotplug || $drive->{interface} =~ m/^(nvme|emmc|sdcard)$/;
+                die "skip\n"
+                    if !$hotplug
+                    || $old_drive->{disconnected}
+                    || $drive->{interface} =~ m/^(nvme|emmc|sdcard)$/;
 
                 return vmconfig_replace_usbdisk(
                     $storecfg, $conf, $vmid, $opt, $drive, $old_drive, $arch, $machine_type,
@@ -5831,6 +5977,8 @@ sub vmconfig_update_disk {
         }
     }
 
+    # A new disconnected disk is prepared at the next start.
+    die "skip\n" if $drive->{disconnected};
     if ($hotplug && $drive->{'nvme-dock-port'}) {
         return thunderbolt_disk_plug($storecfg, $conf, $vmid, $opt, $drive);
     }
@@ -8839,6 +8987,7 @@ sub bootorder_from_legacy {
             my ($ds, $drive) = @_;
 
             return if $drive->{interface} eq 'emmc';
+            return if $drive->{disconnected};
             return
                 if $drive->{interface} eq 'nvme' && ($drive->{detached} || $drive->{'nvme-dock'});
 
@@ -8913,9 +9062,9 @@ sub device_bootorder {
     } elsif ($boot->{order}) {
         my $i = 100; # start at 100 to allow user to insert devices before us with -args
         for my $dev (PVE::Tools::split_list($boot->{order})) {
-            if ($dev =~ m/^nvme\d+$/ && $conf->{$dev}) {
+            if (is_valid_drivename($dev) && $conf->{$dev}) {
                 my $drive = parse_drive($dev, $conf->{$dev});
-                next if $drive && $drive->{detached};
+                next if $drive && ($drive->{disconnected} || $drive->{detached});
             }
             $bootorder->{$dev} = $i++;
         }

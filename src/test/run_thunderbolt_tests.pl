@@ -122,6 +122,9 @@ like(
                 }
             } elsif ($command->[2] eq 'usb4-tunnel-dsp,help') {
                 $options{outfunc}->('  x-reserve-for-dock=<bool>');
+            } elsif ($command->[2] eq 'usb4-device,help') {
+                $options{outfunc}->('  x-dock-nvme-hotplug=<bool>') if $probe_mode eq 'supported';
+                $options{outfunc}->('  x-cable=<bool>') if $probe_mode eq 'supported';
             } else {
                 die "unexpected QEMU probe: @$command\n";
             }
@@ -165,6 +168,68 @@ my $chain_cmd = join(
     "\n",
     PVE::QemuServer::Thunderbolt::devices($chain_hosts, $chain_docks, $chain_order, undef, 1),
 );
+{
+    my $detached = { %$chain, tbdock2 => "$chain->{tbdock2},disconnected=1" };
+    PVE::JSONSchema::validate(
+        $detached,
+        { type => 'object', properties => PVE::QemuServer::json_config_properties({}, 1) },
+    );
+    my ($h, $d, $o) = PVE::QemuServer::Thunderbolt::topology($detached, \%chain_drives);
+    my $cmd = join("\n", PVE::QemuServer::Thunderbolt::devices($h, $d, $o, undef, 1));
+    like($cmd, qr/id=tbdock2,.*x-cable=off/, 'a disconnected dock starts with its cable out');
+    unlike($cmd, qr/id=thunderbolt0-port2,.*x-force-tunnel=on/, 'no forced tunnel for a detached dock');
+    like($cmd, qr/id=tbdock0,.*parent=tbdock2/, 'the downstream dock stays configured');
+    like($cmd, qr/id=tb-nvme1,.*drive=drive-nvme1/, 'the disk stays configured');
+    eval {
+        PVE::QemuServer::NVMe::validate_update(
+            $detached, { tbdock1 => 'host=thunderbolt0,port=2' }, [],
+        );
+    };
+    like($@, qr/port 2 already has a dock/, 'a disconnected dock keeps its upstream port');
+
+    my $qemu = Test::MockModule->new('PVE::QemuServer');
+    my $config = Test::MockModule->new('PVE::QemuConfig');
+    my $cgroup = Test::MockModule->new('PVE::QemuServer::CGroup');
+    $config->mock(write_config => sub { });
+    $cgroup->mock(new => sub { return bless {}, 'PVE::QemuServer::CGroup'; });
+    my $cable = 1;
+    my @changes;
+    my @removed;
+    $qemu->mock(
+        mon_cmd => sub {
+            my (undef, $command, %args) = @_;
+            is($args{path}, '/machine/peripheral/tbdock2', 'operate on the selected dock');
+            is($args{property}, 'x-cable', 'use the virtual cable');
+            return $cable if $command eq 'qom-get';
+            die "unexpected QMP command '$command'" if $command ne 'qom-set';
+            $cable = $args{value};
+            push @changes, $cable ? 1 : 0;
+        },
+    );
+    $qemu->mock(qemu_devicedelverify => sub { push @removed, $_[1]; });
+    my $running = { %$chain, hotplug => 'disk,usb', pending => {} };
+    my $toggle = sub {
+        my ($value) = @_;
+        $running->{pending}->{tbdock2} = $value;
+        my $errors = {};
+        PVE::QemuServer::vmconfig_hotplug_pending(8006, $running, {}, undef, $errors);
+        is_deeply($errors, {}, 'dock connection change reports no hotplug errors');
+    };
+    $toggle->($detached->{tbdock2});
+    is($running->{tbdock2}, $detached->{tbdock2}, 'dock reports disconnected after drain');
+    is_deeply([sort @removed], [qw(nvme0 nvme1 nvme2)], 'wait for disks throughout the subtree');
+    $toggle->($chain->{tbdock2});
+    is_deeply(\@changes, [0, 1], 'reconnecting restores the same dock');
+    is($running->{tbdock2}, $chain->{tbdock2}, 'upstream connection is preserved');
+    is($running->{nvme0}, $chain->{nvme0}, 'child disk configuration is preserved');
+    is_deeply($running->{pending}, {}, 'both connection changes apply immediately');
+
+    $running->{hotplug} = 'disk';
+    $toggle->($detached->{tbdock2});
+    is($running->{pending}->{tbdock2}, $detached->{tbdock2}, 'USB hotplug disabled defers the change');
+    is_deeply(\@changes, [0, 1], 'no runtime cable change when hotplug is disabled');
+}
+
 cmp_ok(
     index($chain_cmd, 'usb4-device,id=tbdock2,'),
     '<',

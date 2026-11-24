@@ -6545,7 +6545,12 @@ __PACKAGE__->register_method({
             );
 
             PVE::QemuServer::Blockdev::resize(
-                $vmid, "drive-$disk", $storecfg, $volid, $newsize,
+                $vmid,
+                "drive-$disk",
+                $storecfg,
+                $volid,
+                $newsize,
+                $drive->{disconnected},
             );
 
             if ($drive->{interface} eq 'emmc') {
