@@ -31,6 +31,7 @@ SOURCES=Agent.pm	\
 	SDCard.pm	\
 	RunState.pm	\
 	StateFile.pm	\
+	Thunderbolt.pm	\
 	USB.pm		\
 	Virtiofs.pm	\
 	VolumeChain.pm

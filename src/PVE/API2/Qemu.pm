@@ -1079,7 +1079,7 @@ my $check_vm_modify_config_perm = sub {
             $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.CPU']);
         } elsif ($memoryoptions->{$opt}) {
             $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.Memory']);
-        } elsif ($hwtypeoptions->{$opt}) {
+        } elsif ($hwtypeoptions->{$opt} || $opt =~ /^(?:thunderbolt|tbdock)\d+$/) {
             $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.HWType']);
         } elsif ($generaloptions->{$opt}) {
             $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.Options']);

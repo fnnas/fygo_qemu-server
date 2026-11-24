@@ -1,6 +1,11 @@
 all: test
 
 test: test_qmp_client test_snapshot test_cfg_to_cmd test_cfg_to_cmd_aarch64 test_pci_addr_conflicts test_pci_reservation test_qemu_img_convert test_migration test_restore_config test_parse_config test_nvme test_usbdisk test_emmc test_sdcard test_custom_machine test_vfio_display test_display_types
+test: test_thunderbolt
+
+.PHONY: test_thunderbolt
+test_thunderbolt:
+	perl -I../ ./run_thunderbolt_tests.pl
 
 test_qmp_client: run_qmp_client_tests.pl
 	perl -I../ ./run_qmp_client_tests.pl

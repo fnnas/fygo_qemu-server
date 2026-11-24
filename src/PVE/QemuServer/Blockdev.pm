@@ -68,7 +68,11 @@ my sub is_fleecing_top_node {
 }
 
 sub qdev_id_to_drive_id {
-    my ($qdev_id) = @_;
+    my ($qdev_id, $node_name) = @_;
+
+    # A Thunderbolt tunnel creates the NVMe frontend with a dynamic QOM name.
+    # The block backend retains the Proxmox drive ID across reconnects.
+    return $1 if ($node_name // '') =~ /^drive-(nvme\d+)$/;
 
     if ($qdev_id =~ m{^/machine/peripheral/((?:virtio|emmc|sdcard|nvme)\d+)/virtio-backend$}) {
         return $1;
@@ -115,7 +119,8 @@ sub get_block_info {
     my $qmp_block_info = mon_cmd($vmid, "query-block");
     for my $info ($qmp_block_info->@*) {
         my $qdev_id = $info->{qdev} or next;
-        my $drive_id = qdev_id_to_drive_id($qdev_id);
+        my $node_name = $info->{device} || ($info->{inserted} // {})->{'node-name'};
+        my $drive_id = qdev_id_to_drive_id($qdev_id, $node_name);
         $block_info->{$drive_id} = $info;
     }
 

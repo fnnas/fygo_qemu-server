@@ -14,6 +14,7 @@ use PVE::Storage::Common;
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::PCI qw(print_pci_addr);
+use PVE::QemuServer::Thunderbolt;
 use PVE::Tools;
 
 # Keep controller settings on the disk which owns the controller. Other disks
@@ -35,7 +36,16 @@ my @subsystem_options = qw(subsystem subnqn nvme-paths fdp fdp-nrg fdp-nruh fdp-
 sub controller_option_names {
     return ('serial', 'nvme-slot', @controller_options, @subsystem_options);
 }
-sub option_names { return ('nvme-controller', controller_option_names(), @namespace_options); }
+
+sub option_names {
+    return (
+        'nvme-dock',
+        'nvme-dock-port',
+        'nvme-controller',
+        controller_option_names(),
+        @namespace_options,
+    );
+}
 
 my %qemu_names = (
     'zoned-zasl' => 'zoned.zasl',
@@ -56,7 +66,23 @@ my %boolean = map { $_ => 1 } qw(
 );
 
 sub option_schema {
-    my $schema = {};
+    my $schema = {
+        'nvme-dock' => {
+            type => 'string',
+            pattern => '^tbdock[0-3]$',
+            format_description => 'dock',
+            optional => 1,
+            description => 'Connect this data disk to a virtual Thunderbolt dock.',
+        },
+        'nvme-dock-port' => {
+            type => 'integer',
+            minimum => 1,
+            maximum => $PVE::QemuServer::Thunderbolt::DOWNSTREAM_PORTS,
+            optional => 1,
+            description =>
+                'Use this downstream port of the dock for an independent NVMe enclosure.',
+        },
+    };
     for my $entry (
         [
             'nvme-controller',
@@ -351,12 +377,30 @@ sub topology {
         $drives->{$id} = PVE::QemuServer::Drive::parse_drive($id, $conf->{$id}, 1)
             or die "unable to parse NVMe disk '$id'\n";
     }
+    PVE::QemuServer::Thunderbolt::topology($conf, $drives);
     my $groups = {};
     for my $id (sort { $drives->{$a}->{index} <=> $drives->{$b}->{index} } keys %$drives) {
         my $drive = $drives->{$id};
+        die "$id: nvme-dock-port requires nvme-dock\n"
+            if $drive->{'nvme-dock-port'} && !$drive->{'nvme-dock'};
+        if ($drive->{'nvme-dock'}) {
+            my @unsupported =
+                grep { $_ !~ /^(?:nvme-dock(?:-port)?|serial)$/ && defined($drive->{$_}) }
+                option_names();
+            die "$id: Thunderbolt disks do not support " . join(', ', @unsupported) . "\n"
+                if @unsupported;
+            if (defined($conf->{boot})) {
+                my $boot = PVE::JSONSchema::parse_property_string('pve-qm-boot', $conf->{boot});
+                die "$id: remove the Thunderbolt disk from the boot order first\n"
+                    if grep { $_ eq $id } split(/;/, $boot->{order} // '');
+            }
+            next;
+        }
         my $owner_id = 'nvme' . ($drive->{'nvme-controller'} // $drive->{index});
         my $owner = $drives->{$owner_id}
             or die "$id: NVMe controller owner '$owner_id' does not exist\n";
+        die "$id: a Thunderbolt disk cannot own another disk's NVMe controller\n"
+            if $owner->{'nvme-dock'};
         die "$id: NVMe controller references cannot be chained\n"
             if ($owner->{'nvme-controller'} // $owner->{index}) != $owner->{index};
         if ($id ne $owner_id) {

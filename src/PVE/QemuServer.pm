@@ -98,6 +98,7 @@ use PVE::QemuServer::QSD;
 use PVE::QemuServer::RNG qw(parse_rng print_rng_device_commandline print_rng_object_commandline);
 use PVE::QemuServer::RunState;
 use PVE::QemuServer::StateFile;
+use PVE::QemuServer::Thunderbolt;
 use PVE::QemuServer::USB;
 use PVE::QemuServer::Virtiofs qw(max_virtiofs start_all_virtiofsd);
 use PVE::QemuServer::VolumeChain;
@@ -1006,6 +1007,9 @@ for (my $i = 0; $i < $PVE::QemuServer::PCI::MAX_HOSTPCI_DEVICES; $i++) {
 for my $key (keys %{$PVE::QemuServer::Drive::drivedesc_hash}) {
     $confdesc->{$key} = $PVE::QemuServer::Drive::drivedesc_hash->{$key};
 }
+
+my %thunderbolt_options = PVE::QemuServer::Thunderbolt::config_descriptions();
+$confdesc->{$_} = $thunderbolt_options{$_} for keys %thunderbolt_options;
 
 for (my $i = 0; $i < $PVE::QemuServer::USB::MAX_USB_DEVICES; $i++) {
     $confdesc->{"usb$i"} = $PVE::QemuServer::USB::usbdesc;
@@ -2813,7 +2817,10 @@ sub vmstatus {
             if ($blockstat->{device}) {
                 $drive_id = $blockstat->{device} =~ s/drive-//r;
             } elsif ($blockstat->{qdev}) {
-                $drive_id = PVE::QemuServer::Blockdev::qdev_id_to_drive_id($blockstat->{qdev});
+                $drive_id = PVE::QemuServer::Blockdev::qdev_id_to_drive_id(
+                    $blockstat->{qdev},
+                    $blockstat->{'node-name'},
+                );
             } else {
                 print "blockstats callback: unexpected missing drive ID\n";
                 next;
@@ -3257,6 +3264,13 @@ sub config_to_command {
         # copy all disks over
         for my $device (PVE::QemuServer::Drive::valid_drive_names()) {
             $newconf->{$device} = $conf->{$device};
+            if ($device =~ /^nvme\d+$/ && defined($conf->{$device})) {
+                my $drive = parse_drive($device, $conf->{$device});
+                if ($drive && delete $drive->{'nvme-dock'}) {
+                    delete $drive->{'nvme-dock-port'};
+                    $newconf->{$device} = PVE::QemuServer::Drive::print_drive($drive);
+                }
+            }
         }
 
         # remaining configs stay default
@@ -3743,6 +3757,7 @@ sub config_to_command {
     push @$devices, PVE::QemuServer::NVMe::controller_devices($conf, $vmid, $arch, $machine_type);
     my $nvme_groups = PVE::QemuServer::NVMe::topology($conf);
     my @automatic_fdp_devices;
+    my %thunderbolt_drives;
 
     PVE::QemuConfig->foreach_volume(
         $conf,
@@ -3884,6 +3899,10 @@ sub config_to_command {
                 push @$devices, '-drive', $drive_cmd;
             }
 
+            if ($drive->{'nvme-dock'}) {
+                $thunderbolt_drives{$ds} = $drive;
+                return;
+            }
             my $device = print_drivedevice_full(
                 $storecfg, $conf, $vmid, $drive, $arch, $machine_type,
             );
@@ -3899,6 +3918,20 @@ sub config_to_command {
         },
     );
     push @$devices, @automatic_fdp_devices;
+    my ($tb_hosts, $tb_docks, $tb_order) =
+        PVE::QemuServer::Thunderbolt::topology($conf, \%thunderbolt_drives);
+    if (keys %$tb_hosts) {
+        # Thunderbolt tunnel ports must handle their secondary bus hotplug.
+        push @$cmd, '-global', 'ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off';
+        push @$devices,
+            PVE::QemuServer::Thunderbolt::devices(
+                $tb_hosts,
+                $tb_docks,
+                $tb_order,
+                $kvm_binary,
+                $dry_run,
+            );
+    }
 
     my $nets_host_mtu =
         { map { split('=', $_) } PVE::Tools::split_list($options->{'nets-host-mtu'}) };
@@ -4080,7 +4113,8 @@ sub vm_devices_list {
         }
         if (!defined($drive_id)) {
             my $qdev_id = $block->{qdev} or next;
-            $drive_id = PVE::QemuServer::Blockdev::qdev_id_to_drive_id($qdev_id);
+            my $node_name = $block->{device} || ($block->{inserted} // {})->{'node-name'};
+            $drive_id = PVE::QemuServer::Blockdev::qdev_id_to_drive_id($qdev_id, $node_name);
         }
         $devices->{$drive_id} = 1;
     }
@@ -4098,7 +4132,7 @@ sub vm_devices_list {
     # qom-list path=/machine/peripheral
     my $resperipheral = mon_cmd($vmid, 'qom-list', path => '/machine/peripheral');
     foreach my $per (@$resperipheral) {
-        if ($per->{name} =~ m/^usb(?:disk|redirdev)?\d+$/) {
+        if ($per->{name} =~ m/^(?:usb(?:disk|redirdev)?|tbdock|tb-nvme)\d+$/) {
             $devices->{ $per->{name} } = 1;
         }
     }
@@ -4389,6 +4423,84 @@ sub qemu_deviceaddverify {
     }
 
     die "error on hotplug device '$deviceid'\n";
+}
+
+my sub thunderbolt_device_unplug {
+    my ($vmid, $id, $drive_id) = @_;
+    my $devices = vm_devices_list($vmid);
+    qemu_devicedel($vmid, $id) if $devices->{$id};
+    qemu_devicedelverify($vmid, $id, 10);
+    if ($drive_id) {
+        # The USB4 router can be removed before its PCIe endpoint is drained.
+        qemu_devicedelverify($vmid, $drive_id, 10);
+        qemu_drivedel($vmid, $drive_id);
+    }
+}
+
+my sub thunderbolt_check_port {
+    my ($vmid, $host, $parent, $port) = @_;
+    my $devices = vm_devices_list($vmid);
+    die "skip\n" if !$devices->{$host};
+    if ($parent) {
+        die "skip\n" if !$devices->{$parent};
+        my $ports = mon_cmd(
+            $vmid, 'qom-get',
+            path => "/machine/peripheral/$parent",
+            property => 'downstream-ports',
+        );
+        die "skip\n" if $port > $ports;
+    } else {
+        die "skip\n" if !$devices->{"$host-port$port"};
+    }
+}
+
+my sub thunderbolt_check_dock_bridge {
+    my ($vmid, $parent, $port) = @_;
+    return if !$parent;
+    my $devices = mon_cmd($vmid, 'qom-list', path => '/machine/peripheral');
+    for my $device ($devices->@*) {
+        next if $device->{type} ne 'child<usb4-tunnel-dsp>';
+        next if $device->{name} !~ /-usb4dp$port$/;
+        my $path = "/machine/peripheral/$device->{name}";
+        my $owner = mon_cmd($vmid, 'qom-get', path => $path, property => 'usb4-device');
+        next if $owner ne "/machine/peripheral/$parent";
+        my $reserved =
+            eval { mon_cmd($vmid, 'qom-get', path => $path, property => 'x-reserve-for-dock'); };
+        return if $reserved;
+        last;
+    }
+    # The running VM has not reserved space to enumerate a PCIe switch here.
+    die "skip\n";
+}
+
+my sub thunderbolt_disk_plug {
+    my ($storecfg, $conf, $vmid, $id, $drive) = @_;
+    my $dock_id = $drive->{'nvme-dock'};
+    my $port = $drive->{'nvme-dock-port'} or die "skip\n";
+    my %next = (%$conf, $id => PVE::QemuServer::Drive::print_drive($drive));
+    eval { PVE::QemuServer::NVMe::topology(\%next) };
+    die "skip\n" if $@;
+    my (undef, $docks) = PVE::QemuServer::Thunderbolt::topology($conf, {});
+    my $dock = $docks->{$dock_id} or die "skip\n";
+    thunderbolt_check_port($vmid, $dock->{root}, $dock_id, $port);
+
+    PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $drive->{file} !~ m|^/dev/.+|;
+    my $device = "tb-$id";
+    my $spec = PVE::QemuServer::Thunderbolt::disk_device(
+        $id, $dock_id, $dock->{root}, $port, $drive->{serial},
+    );
+    # Recover from an earlier hotplug whose cleanup could not finish.
+    thunderbolt_device_unplug($vmid, $device, $id);
+    eval {
+        qemu_driveadd($storecfg, $vmid, $drive);
+        qemu_deviceadd($vmid, $spec);
+        qemu_deviceaddverify($vmid, $device);
+    };
+    if (my $err = $@) {
+        eval { thunderbolt_device_unplug($vmid, $device, $id) };
+        warn $@ if $@;
+        die $err;
+    }
 }
 
 sub qemu_devicedelverify {
@@ -4988,7 +5100,12 @@ sub vmconfig_hotplug_pending {
 
     my $cgroup = PVE::QemuServer::CGroup->new($vmid);
 
-    foreach my $opt (sort keys %$pending_delete_hash) {
+    my @remove = sort grep { !/^tbdock\d+$/ } keys %$pending_delete_hash;
+    if (grep { /^tbdock\d+$/ } keys %$pending_delete_hash) {
+        my (undef, undef, $order) = PVE::QemuServer::Thunderbolt::topology($conf, {});
+        push @remove, grep { $pending_delete_hash->{$_} } reverse @$order;
+    }
+    foreach my $opt (@remove) {
         next if $selection && !$selection->{$opt};
         my $force = $pending_delete_hash->{$opt}->{force};
         eval {
@@ -5030,15 +5147,29 @@ sub vmconfig_hotplug_pending {
                     $net->{macaddr},
                     $conf->{name},
                 );
+            } elsif ($opt =~ /^tbdock\d+$/) {
+                die "skip\n" if !$hotplug_features->{usb};
+                # Keep a dock attached while it has any live child devices.
+                my %next = %$conf;
+                delete $next{$opt};
+                eval { PVE::QemuServer::NVMe::topology(\%next) };
+                die "skip\n" if $@;
+                thunderbolt_device_unplug($vmid, $opt);
             } elsif (is_valid_drivename($opt)) {
-                die "skip\n"
-                    if !(
-                        $opt =~ /^usbdisk\d+$/
-                        ? $hotplug_features->{usb}
-                        : $hotplug_features->{disk}
-                    )
-                    || $opt =~ m/(efidisk|ide|sata|nvme|emmc|sdcard|tpmstate)(\d+)/;
-                vm_deviceunplug($vmid, $conf, $opt);
+                my $drive = $opt =~ /^nvme\d+$/ ? parse_drive($opt, $conf->{$opt}) : undef;
+                if ($drive && $drive->{'nvme-dock-port'}) {
+                    die "skip\n" if !$hotplug_features->{disk};
+                    thunderbolt_device_unplug($vmid, "tb-$opt", $opt);
+                } else {
+                    die "skip\n"
+                        if !(
+                            $opt =~ /^usbdisk\d+$/
+                            ? $hotplug_features->{usb}
+                            : $hotplug_features->{disk}
+                        )
+                        || $opt =~ m/(efidisk|ide|sata|nvme|emmc|sdcard|tpmstate)(\d+)/;
+                    vm_deviceunplug($vmid, $conf, $opt);
+                }
                 vmconfig_delete_or_detach_drive($vmid, $storecfg, $conf, $opt, $force);
             } elsif ($opt =~ m/^memory$/) {
                 die "skip\n" if !$hotplug_features->{memory};
@@ -5061,7 +5192,15 @@ sub vmconfig_hotplug_pending {
     }
 
     my $cloudinit_opt;
-    foreach my $opt (keys %{ $conf->{pending} }) {
+    my @add = grep { !/^tbdock\d+$/ } keys %{ $conf->{pending} };
+    if (grep { /^tbdock\d+$/ } keys %{ $conf->{pending} }) {
+        my %next = (%$conf, $conf->{pending}->%*);
+        my $deletions = PVE::QemuConfig->parse_pending_delete($conf->{pending}->{delete});
+        delete $next{$_} for keys %$deletions;
+        my (undef, undef, $order) = PVE::QemuServer::Thunderbolt::topology(\%next, {});
+        unshift @add, grep { defined($conf->{pending}->{$_}) } @$order;
+    }
+    foreach my $opt (@add) {
         next if $selection && !$selection->{$opt};
         my $value = $conf->{pending}->{$opt};
         eval {
@@ -5114,6 +5253,31 @@ sub vmconfig_hotplug_pending {
                     $arch,
                     $machine_type->(),
                 );
+            } elsif ($opt =~ /^tbdock\d+$/) {
+                die "skip\n" if !$hotplug_features->{usb} || defined($conf->{$opt});
+                my %next = (%$conf, $opt => $value);
+                my $docks;
+                eval {
+                    PVE::QemuServer::NVMe::topology(\%next);
+                    (undef, $docks) = PVE::QemuServer::Thunderbolt::topology(\%next, {});
+                };
+                die "skip\n" if $@;
+                my $dock = $docks->{$opt};
+                thunderbolt_check_port($vmid, $dock->{root}, $dock->{parent}, $dock->{port});
+                thunderbolt_check_dock_bridge($vmid, $dock->{parent}, $dock->{port});
+                thunderbolt_device_unplug($vmid, $opt);
+                eval {
+                    qemu_deviceadd(
+                        $vmid,
+                        PVE::QemuServer::Thunderbolt::dock_device($opt, $dock),
+                    );
+                    qemu_deviceaddverify($vmid, $opt);
+                };
+                if (my $err = $@) {
+                    eval { thunderbolt_device_unplug($vmid, $opt) };
+                    warn $@ if $@;
+                    die $err;
+                }
             } elsif (is_valid_drivename($opt)) {
                 die "skip\n" if $opt eq 'efidisk0' || $opt eq 'tpmstate0';
                 # some changes can be done without hotplug
@@ -5667,6 +5831,9 @@ sub vmconfig_update_disk {
         }
     }
 
+    if ($hotplug && $drive->{'nvme-dock-port'}) {
+        return thunderbolt_disk_plug($storecfg, $conf, $vmid, $opt, $drive);
+    }
     die "skip\n" if !$hotplug || $opt =~ m/(ide|sata|nvme|emmc|sdcard)(\d+)/;
     if ($drive->{interface} eq 'usbdisk') {
         # New VMs reserve this controller at startup. Older running VMs can
@@ -8672,7 +8839,8 @@ sub bootorder_from_legacy {
             my ($ds, $drive) = @_;
 
             return if $drive->{interface} eq 'emmc';
-            return if $drive->{interface} eq 'nvme' && $drive->{detached};
+            return
+                if $drive->{interface} eq 'nvme' && ($drive->{detached} || $drive->{'nvme-dock'});
 
             if (drive_is_cdrom($drive, 1)) {
                 if ($bootindex_hash->{d}) {
@@ -8709,7 +8877,12 @@ sub get_default_bootdevices {
     my @ret = ();
 
     # harddisk
-    my $first = PVE::QemuServer::Drive::resolve_first_disk($conf, 0);
+    my $bootconf = {%$conf};
+    for my $id (grep { /^nvme\d+$/ && defined($conf->{$_}) } keys %$conf) {
+        my $drive = parse_drive($id, $conf->{$id});
+        delete $bootconf->{$id} if $drive && $drive->{'nvme-dock'};
+    }
+    my $first = PVE::QemuServer::Drive::resolve_first_disk($bootconf, 0);
     push @ret, $first if $first;
 
     # cdrom
